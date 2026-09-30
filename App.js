@@ -22,7 +22,9 @@ LogBox.ignoreLogs([
   "Warning: React Native CLI uses a custom Metro serializer that is not compatible with the default Metro serializer. Please update your React Native CLI configuration or use the default serializer.",
   "Componentwillunmount",
   "componentDidUpdate",
-  "ReactNativeART is deprecated and will be removed in a future release"
+  "ReactNativeART is deprecated and will be removed in a future release",
+  "Non-serializable values were found in the navigation state",
+  "InteractionManager has been deprecated"
 ]);
 
 

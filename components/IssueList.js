@@ -1,27 +1,30 @@
 import React from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { COLORS, RADIUS, SPACING } from "../utils/theme";
-import { formatError } from "../utils/formatters";
+import { deriveIssues } from "../utils/formatters";
 
 /**
- * ErrorList — renders an array of error keys as styled pill tags.
- * Shows a "No errors" message when the array is empty.
- * @param {{ errors: string[] }} props
+ * IssueList — renders technique issues derived from event_classification
+ * and technique_flags. Shows a "No issues" message when everything is clean.
+ *
+ * @param {{ event_classification: Object, technique_flags: Object }} props
  */
-export default function ErrorList({ errors }) {
-  if (!errors || errors.length === 0) {
+export default function IssueList({ event_classification, technique_flags }) {
+  const issues = deriveIssues(event_classification, technique_flags);
+
+  if (issues.length === 0) {
     return (
       <View style={styles.emptyRow}>
-        <Text style={styles.noErrors}>✓ No errors detected</Text>
+        <Text style={styles.noIssues}>✓ No issues detected</Text>
       </View>
     );
   }
 
   return (
     <View style={styles.row}>
-      {errors.map((err) => (
-        <View key={err} style={styles.tag}>
-          <Text style={styles.tagText}>{formatError(err)}</Text>
+      {issues.map((issue) => (
+        <View key={issue} style={styles.tag}>
+          <Text style={styles.tagText}>{issue}</Text>
         </View>
       ))}
     </View>
@@ -50,7 +53,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
   },
-  noErrors: {
+  noIssues: {
     color: COLORS.success,
     fontSize: 13,
     fontWeight: "500",

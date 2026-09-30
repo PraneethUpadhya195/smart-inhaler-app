@@ -7,16 +7,19 @@ import { formatTimestamp, formatDuration } from "../utils/formatters";
 
 /**
  * SessionCard — compact card for use in History list.
+ * Reads from the PRISM session schema (event_classification, quality_assessment).
+ *
  * @param {{ session: Object, onPress: Function }} props
  */
 export default function SessionCard({ session, onPress }) {
-  const { timestamp, label, duration, quality, source, status } = session;
+  const { timestamp, duration, quality_assessment, source, status } = session;
+  const compositeLabel = quality_assessment?.composite_label;
 
   return (
     <TouchableOpacity style={[styles.card, SHADOW.card]} onPress={onPress} activeOpacity={0.75}>
       {/* Top row: result badge + tags */}
       <View style={styles.topRow}>
-        <ResultBadge label={label} size="sm" />
+        <ResultBadge label={compositeLabel} size="sm" />
         <View style={styles.tagsRow}>
           <StatusTag type="source" value={source} />
           {status === "interrupted" && <StatusTag type="status" value="interrupted" />}
@@ -29,8 +32,6 @@ export default function SessionCard({ session, onPress }) {
       {/* Stats row */}
       <View style={styles.statsRow}>
         <Stat label="Duration" value={formatDuration(duration)} />
-        <View style={styles.divider} />
-        <Stat label="Quality" value={quality != null ? `${quality}%` : "—"} />
       </View>
     </TouchableOpacity>
   );

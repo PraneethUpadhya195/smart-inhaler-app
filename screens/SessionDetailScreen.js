@@ -1,25 +1,34 @@
 import React from "react";
 import { View, Text, StyleSheet, ScrollView } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import ResultBadge from "../components/ResultBadge";
-import ErrorList from "../components/ErrorList";
+import IssueList from "../components/IssueList";
 import StatusTag from "../components/StatusTag";
 import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
-import { formatTimestamp, formatDuration } from "../utils/formatters";
+import {
+  formatTimestamp,
+  formatDuration,
+  formatMs,
+  formatDeviationFlag,
+} from "../utils/formatters";
 
 export default function SessionDetailScreen({ route }) {
   const { session } = route.params;
   const {
     timestamp,
     duration,
-    quality,
-    errors,
-    label,
+    event_classification,
+    quality_assessment,
+    technique_flags,
     source,
     status,
     deviceId,
+    model_version,
   } = session;
 
   const isInterrupted = status === "interrupted";
+  const ec = event_classification || {};
+  const qa = quality_assessment || {};
 
   return (
     <ScrollView
@@ -41,7 +50,7 @@ export default function SessionDetailScreen({ route }) {
       {/* Result + tags */}
       <View style={[styles.card, SHADOW.card]}>
         <Row label="Result">
-          <ResultBadge label={label || "—"} />
+          <ResultBadge label={qa.composite_label} />
         </Row>
         <Row label="Source">
           <StatusTag type="source" value={source} />
@@ -54,30 +63,76 @@ export default function SessionDetailScreen({ route }) {
         <Row label="Timestamp">
           <Text style={styles.value}>{formatTimestamp(timestamp)}</Text>
         </Row>
+        {model_version && (
+          <Row label="Model">
+            <Text style={styles.valueMono}>{model_version}</Text>
+          </Row>
+        )}
       </View>
 
-      {/* Metrics */}
+      {/* Quality Assessment */}
       <View style={[styles.card, SHADOW.card]}>
-        <Text style={styles.sectionTitle}>Metrics</Text>
+        <Text style={styles.sectionTitle}>Quality Assessment</Text>
         <View style={styles.metricsGrid}>
-          <MetricBox label="Duration" value={formatDuration(duration)} />
           <MetricBox
-            label="Quality"
-            value={quality != null ? `${quality}%` : "—"}
-            color={
-              quality == null ? COLORS.textMuted
-              : quality >= 70 ? COLORS.success
-              : quality >= 40 ? COLORS.warning
-              : COLORS.danger
-            }
+            label="Duration"
+            value={formatDuration(duration)}
+          />
+        </View>
+        <View style={styles.metricsGrid}>
+          <MetricBox
+            label="Deviation"
+            value={qa.deviation_score != null ? qa.deviation_score.toFixed(1) : "—"}
+            color={deviationColor(qa.deviation_score)}
+          />
+          <MetricBox
+            label="Baseline"
+            value={formatDeviationFlag(qa.deviation_flag)}
+            small
           />
         </View>
       </View>
 
-      {/* Errors */}
+      {/* Event Classification */}
       <View style={[styles.card, SHADOW.card]}>
-        <Text style={styles.sectionTitle}>Errors Detected</Text>
-        <ErrorList errors={errors} />
+        <Text style={styles.sectionTitle}>Event Classification</Text>
+        <DetailRow
+          icon="medical-outline"
+          label="Drug Detected"
+          value={ec.drug_detected ? "Yes" : "No"}
+          valueColor={ec.drug_detected ? COLORS.success : COLORS.danger}
+        />
+        <DetailRow
+          icon="timer-outline"
+          label="Drug Duration"
+          value={formatMs(ec.drug_duration_ms)}
+        />
+        <DetailRow
+          icon="resize-outline"
+          label="Inhale Duration"
+          value={formatMs(ec.inhale_duration_ms)}
+        />
+        <DetailRow
+          icon="sync-outline"
+          label="Coordination Delay"
+          value={formatMs(ec.coordination_delay_ms)}
+          valueColor={ec.coordination_delay_ms > 500 ? COLORS.warning : undefined}
+        />
+        <DetailRow
+          icon="swap-vertical-outline"
+          label="Pre-Exhale Detected"
+          value={ec.pre_exhale_detected ? "Yes" : "No"}
+          valueColor={ec.pre_exhale_detected ? COLORS.success : COLORS.warning}
+        />
+      </View>
+
+      {/* Technique Issues */}
+      <View style={[styles.card, SHADOW.card]}>
+        <Text style={styles.sectionTitle}>Technique Issues</Text>
+        <IssueList
+          event_classification={event_classification}
+          technique_flags={technique_flags}
+        />
       </View>
 
       {/* Device info */}
@@ -91,6 +146,8 @@ export default function SessionDetailScreen({ route }) {
   );
 }
 
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
 function Row({ label, children }) {
   return (
     <View style={styles.row}>
@@ -100,14 +157,44 @@ function Row({ label, children }) {
   );
 }
 
-function MetricBox({ label, value, color }) {
+function MetricBox({ label, value, color, small }) {
   return (
     <View style={styles.metricBox}>
-      <Text style={[styles.metricValue, color && { color }]}>{value}</Text>
+      <Text
+        style={[
+          small ? styles.metricValueSmall : styles.metricValue,
+          color && { color },
+        ]}
+        numberOfLines={1}
+        adjustsFontSizeToFit
+      >
+        {value}
+      </Text>
       <Text style={styles.metricLabel}>{label}</Text>
     </View>
   );
 }
+
+function DetailRow({ icon, label, value, valueColor }) {
+  return (
+    <View style={styles.detailRow}>
+      <Ionicons name={icon} size={16} color={COLORS.textMuted} style={styles.detailIcon} />
+      <Text style={styles.detailLabel}>{label}</Text>
+      <Text style={[styles.detailValue, valueColor && { color: valueColor }]}>{value}</Text>
+    </View>
+  );
+}
+
+// ─── Color helpers ────────────────────────────────────────────────────────────
+
+function deviationColor(score) {
+  if (score == null) return COLORS.textMuted;
+  if (score < 1.5) return COLORS.success;
+  if (score < 3.0) return COLORS.warning;
+  return COLORS.danger;
+}
+
+// ─── Styles ──────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.background },
@@ -153,6 +240,7 @@ const styles = StyleSheet.create({
   },
   rowLabel: { color: COLORS.textSecondary, fontSize: 14 },
   value: { color: COLORS.text, fontSize: 14, fontWeight: "500" },
+  valueMono: { color: COLORS.textSecondary, fontSize: 12, fontFamily: "monospace" },
 
   metricsGrid: {
     flexDirection: "row",
@@ -167,7 +255,19 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   metricValue: { fontSize: 28, fontWeight: "700", color: COLORS.text },
+  metricValueSmall: { fontSize: 16, fontWeight: "700", color: COLORS.text },
   metricLabel: { fontSize: 12, color: COLORS.textMuted },
+
+  detailRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: SPACING.xs + 2,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  detailIcon: { marginRight: SPACING.sm },
+  detailLabel: { flex: 1, color: COLORS.textSecondary, fontSize: 14 },
+  detailValue: { color: COLORS.text, fontSize: 14, fontWeight: "600" },
 
   deviceId: { color: COLORS.textSecondary, fontSize: 13, fontFamily: "monospace" },
 });

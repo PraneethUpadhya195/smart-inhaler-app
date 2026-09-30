@@ -72,9 +72,9 @@ export async function startBleSession(userId, deviceId) {
   const ref = await addDoc(sessionsRef(userId), {
     timestamp: serverTimestamp(),
     duration: null,
-    quality: null,
-    errors: [],
-    label: null,
+    event_classification: null,
+    quality_assessment: null,
+    technique_flags: null,
     source: "ble",
     status: "in_progress",
     deviceId,

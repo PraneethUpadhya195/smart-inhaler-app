@@ -15,7 +15,7 @@ import ResultBadge from "../components/ResultBadge";
 import ProgressBar from "../components/ProgressBar";
 import StatusTag from "../components/StatusTag";
 import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
-import { formatDuration, getTodayCompletedCount } from "../utils/formatters";
+import { formatDuration, formatMs, getTodayCompletedCount } from "../utils/formatters";
 
 export default function DashboardScreen() {
   const { sessions, addNewSession, deviceStatus } = useAppContext();
@@ -71,29 +71,7 @@ export default function DashboardScreen() {
       <View style={[styles.card, SHADOW.card]}>
         <Text style={styles.cardTitle}>Last Inhalation</Text>
         {lastSession ? (
-          <View style={styles.lastSessionContent}>
-            <ResultBadge label={lastSession.label} />
-            {lastSession.status === "interrupted" && (
-              <StatusTag type="status" value="interrupted" />
-            )}
-            <View style={styles.statsRow}>
-              <MiniStat
-                icon="time-outline"
-                value={formatDuration(lastSession.duration)}
-                label="Duration"
-              />
-              <MiniStat
-                icon="pulse-outline"
-                value={lastSession.quality != null ? `${lastSession.quality}%` : "—"}
-                label="Quality"
-              />
-              <MiniStat
-                icon="warning-outline"
-                value={lastSession.errors?.length ?? 0}
-                label="Errors"
-              />
-            </View>
-          </View>
+          <LastSessionContent session={lastSession} />
         ) : (
           <Text style={styles.emptyText}>No sessions yet. Simulate one below!</Text>
         )}
@@ -120,6 +98,34 @@ export default function DashboardScreen() {
         Tap to generate a mock inhalation session and save it to Firestore
       </Text>
     </ScrollView>
+  );
+}
+
+function LastSessionContent({ session }) {
+  const { quality_assessment, event_classification, status } = session;
+  const compositeLabel = quality_assessment?.composite_label;
+  const inhaleDur = event_classification?.inhale_duration_ms;
+  const coordDelay = event_classification?.coordination_delay_ms;
+
+  return (
+    <View style={styles.lastSessionContent}>
+      <ResultBadge label={compositeLabel} />
+      {status === "interrupted" && (
+        <StatusTag type="status" value="interrupted" />
+      )}
+      <View style={styles.statsRow}>
+        <MiniStat
+          icon="time-outline"
+          value={formatMs(inhaleDur)}
+          label="Inhale"
+        />
+        <MiniStat
+          icon="sync-outline"
+          value={formatMs(coordDelay)}
+          label="Coord. Delay"
+        />
+      </View>
+    </View>
   );
 }
 

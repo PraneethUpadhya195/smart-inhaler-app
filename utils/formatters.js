@@ -1,5 +1,7 @@
 /**
  * formatters.js — Shared date/number formatting helpers.
+ *
+ * Updated to support PRISM session schema (ARCHITECTURE.md §10).
  */
 
 /**
@@ -28,14 +30,70 @@ export function formatDuration(seconds) {
 }
 
 /**
- * Formats an error key into a readable label.
- * e.g. "too_fast" → "Too Fast"
+ * Formats milliseconds to a readable duration string.
+ * e.g. 2340 → "2.3s", 280 → "0.28s"
  */
-export function formatError(errorKey) {
-  return errorKey
-    .split("_")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
+export function formatMs(ms) {
+  if (ms == null) return "—";
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${ms}ms`;
+}
+
+/**
+ * Formats a composite_label into a user-friendly display string.
+ * e.g. "GOOD_BUT_INCONSISTENT" → "Inconsistent"
+ */
+const LABEL_DISPLAY = {
+  GOOD: "Good",
+  POOR: "Poor",
+  GOOD_BUT_INCONSISTENT: "Inconsistent",
+  ABNORMAL: "Abnormal",
+  MISSED_DOSE: "Missed Dose",
+};
+
+export function formatCompositeLabel(label) {
+  if (!label) return "—";
+  return LABEL_DISPLAY[label] || label;
+}
+
+/**
+ * Formats a deviation_flag into a user-friendly display string.
+ * e.g. "within_baseline" → "Within Baseline"
+ */
+const DEVIATION_DISPLAY = {
+  within_baseline: "Within Baseline",
+  mild_deviation: "Mild Deviation",
+  significant_deviation: "Significant Deviation",
+};
+
+export function formatDeviationFlag(flag) {
+  if (!flag) return "—";
+  return DEVIATION_DISPLAY[flag] || flag;
+}
+
+/**
+ * Derives a list of human-readable technique issue descriptions
+ * from event_classification and technique_flags.
+ * Returns an empty array when the session has no issues.
+ */
+export function deriveIssues(event_classification, technique_flags) {
+  const issues = [];
+  if (!event_classification) return issues;
+
+  if (technique_flags?.missed_dose || !event_classification.drug_detected) {
+    issues.push("No drug actuation detected");
+  }
+  if (technique_flags?.insufficient_inhale) {
+    issues.push("Inhalation too short (< 1.0s)");
+  }
+  if (technique_flags?.late_actuation) {
+    issues.push("Late actuation (> 0.5s delay)");
+  }
+  if (event_classification.drug_detected && !event_classification.pre_exhale_detected) {
+    issues.push("No pre-inhalation exhale");
+  }
+
+  return issues;
 }
 
 /**

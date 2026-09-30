@@ -60,7 +60,6 @@ export default function DeviceScreen() {
           if (activeBleSessionId.current) {
             await sessionService.completeBleSession(userId, activeBleSessionId.current, {
               ...eventData,
-              label: eventData.label,
               source: "ble",
             });
             const completedSession = {
@@ -102,20 +101,20 @@ export default function DeviceScreen() {
       // If a session was in progress, mark it interrupted
       if (activeBleSessionId.current) {
         await sessionService.interruptBleSession(userId, activeBleSessionId.current, {
-          label: null,
           duration: null,
-          quality: null,
-          errors: [],
+          event_classification: null,
+          quality_assessment: null,
+          technique_flags: null,
         });
         const interruptedSession = {
           id: activeBleSessionId.current,
           source: "ble",
           status: "interrupted",
           deviceId,
-          label: null,
           duration: null,
-          quality: null,
-          errors: [],
+          event_classification: null,
+          quality_assessment: null,
+          technique_flags: null,
           timestamp: new Date(),
         };
         prependSession(interruptedSession);

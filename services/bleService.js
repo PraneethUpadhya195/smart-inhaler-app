@@ -14,7 +14,7 @@
  *   getBatteryLevel()              → number | null
  *   triggerBeep()                  → Promise<void>
  *   subscribeToInhalationEvents(callback) → unsubscribe fn
- *     callback receives: { duration, quality, errors, label }
+ *     callback receives: { duration, event_classification, quality_assessment, technique_flags }
  */
 
 import { generateMockSession } from "./simulationService";
@@ -122,7 +122,7 @@ export async function triggerBeep() {
  *
  * FUTURE: Subscribe to a BLE notification characteristic here instead.
  *
- * @param {Function} callback — called with { duration, quality, errors, label }
+ * @param {Function} callback — called with { duration, event_classification, quality_assessment, technique_flags }
  * @returns {Function} unsubscribe — call to cancel the pending event
  */
 export function subscribeToInhalationEvents(callback) {
@@ -140,9 +140,11 @@ export function subscribeToInhalationEvents(callback) {
       console.log("[BLE] 📡 Inhalation event received:", session);
       callback({
         duration: session.duration,
-        quality: session.quality,
-        errors: session.errors,
-        label: session.label,
+        event_classification: session.event_classification,
+        quality_assessment: session.quality_assessment,
+        technique_flags: session.technique_flags,
+        model_version: session.model_version,
+        app_version: session.app_version,
       });
     }
   }, 3000); // 3s simulates a BLE inhalation event

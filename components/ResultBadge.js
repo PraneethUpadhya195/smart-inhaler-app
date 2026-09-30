@@ -3,34 +3,46 @@ import { View, Text, StyleSheet } from "react-native";
 import { COLORS, RADIUS, SPACING } from "../utils/theme";
 
 /**
- * ResultBadge — color-coded pill for Correct / Incorrect.
- * @param {{ label: "Correct" | "Incorrect", size?: "sm" | "md" }} props
+ * ResultBadge — color-coded pill for PRISM composite quality labels.
+ *
+ * Labels: GOOD | POOR | GOOD_BUT_INCONSISTENT | ABNORMAL | MISSED_DOSE
+ *
+ * @param {{ label: string, size?: "sm" | "md" }} props
  */
 export default function ResultBadge({ label, size = "md" }) {
-  const isCorrect = label === "Correct";
+  const config = LABEL_CONFIG[label] || LABEL_CONFIG.default;
   const isSmall = size === "sm";
 
   return (
     <View
       style={[
         styles.badge,
-        { backgroundColor: isCorrect ? COLORS.success + "22" : COLORS.danger + "22" },
+        { backgroundColor: config.color + "22" },
         isSmall && styles.badgeSmall,
       ]}
     >
-      <View style={[styles.dot, { backgroundColor: isCorrect ? COLORS.success : COLORS.danger }]} />
+      <View style={[styles.dot, { backgroundColor: config.color }]} />
       <Text
         style={[
           styles.text,
-          { color: isCorrect ? COLORS.success : COLORS.danger },
+          { color: config.color },
           isSmall && styles.textSmall,
         ]}
       >
-        {label || "—"}
+        {config.display}
       </Text>
     </View>
   );
 }
+
+const LABEL_CONFIG = {
+  GOOD: { display: "Good", color: COLORS.success },
+  POOR: { display: "Poor", color: COLORS.danger },
+  GOOD_BUT_INCONSISTENT: { display: "Inconsistent", color: COLORS.warning },
+  ABNORMAL: { display: "Abnormal", color: COLORS.info },
+  MISSED_DOSE: { display: "Missed Dose", color: COLORS.danger },
+  default: { display: "—", color: COLORS.textMuted },
+};
 
 const styles = StyleSheet.create({
   badge: {
