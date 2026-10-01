@@ -109,8 +109,42 @@ export default class InferencePipeline {
    * @returns {import('./types').CnnWindow[]}
    */
   buildWindows(frameFeatures) {
-    // TODO: Stage 5 — CNN Sliding-Window Builder
-    throw new Error("buildWindows() not yet implemented (Stage 5).");
+    const windows = [];
+    const windowSize = PIPELINE_CONFIG.windowSize; // 25
+    const stride = PIPELINE_CONFIG.windowStride; // 2
+    
+    if (frameFeatures.length < windowSize) {
+      return windows;
+    }
+    
+    const numWindows = Math.floor((frameFeatures.length - windowSize) / stride) + 1;
+    const numFeats = 124; // Constant 124-dim features
+    
+    for (let w = 0; w < numWindows; w++) {
+      const startIndex = w * stride;
+      const endIndex = startIndex + windowSize;
+      
+      const tensor = new Float32Array(windowSize * numFeats);
+      let ptr = 0;
+      
+      for (let f = startIndex; f < endIndex; f++) {
+        tensor.set(frameFeatures[f].features, ptr);
+        ptr += numFeats;
+      }
+      
+      windows.push({
+        windowIndex: w,
+        tensor: tensor,
+        startTime: frameFeatures[startIndex].timestamp,
+        // The endTime of the window is the timestamp of the last frame in the window,
+        // plus the hop size (which represents the physical time covered by that last frame's stride).
+        // For simplicity we just use the timestamp of the last frame + hop duration.
+        // Assuming 8000Hz and hop=64, hop duration = 0.008s.
+        endTime: frameFeatures[endIndex - 1].timestamp + (64.0 / 8000.0)
+      });
+    }
+    
+    return windows;
   }
 
   /**
