@@ -243,8 +243,79 @@ export default class InferencePipeline {
    * @returns {import('./types').DecodedEvent[]}
    */
   decodeEvents(predictions, pcmData) {
-    // TODO: Stage 8 — Temporal Event Decoder
-    throw new Error("decodeEvents() not yet implemented (Stage 8).");
+    if (predictions.length === 0) return [];
+    
+    // 1. Filter to Inhale predictions (Class index 2)
+    const inhaleWins = predictions.filter(p => p.predictedClass === 2);
+    if (inhaleWins.length === 0) return [];
+    
+    // Sort chronologically (should already be sorted, but to be safe)
+    inhaleWins.sort((a, b) => a.startTime - b.startTime);
+    
+    const events = [];
+    let currentEvent = null;
+    let eventId = 0;
+    
+    for (const win of inhaleWins) {
+      if (!currentEvent) {
+        currentEvent = { windows: [win], end: win.endTime };
+      } else {
+        // A window joins if its start <= the latest end of the event's windows
+        if (win.startTime <= currentEvent.end + 1e-6) {
+          currentEvent.windows.push(win);
+          currentEvent.end = Math.max(currentEvent.end, win.endTime);
+        } else {
+          // Finish current event
+          events.push(this._finalizeEvent(currentEvent, eventId++, pcmData));
+          
+          // Start new event
+          currentEvent = { windows: [win], end: win.endTime };
+        }
+      }
+    }
+    
+    if (currentEvent) {
+      events.push(this._finalizeEvent(currentEvent, eventId++, pcmData));
+    }
+    
+    return events;
+  }
+  
+  /**
+   * Helper to build the final event structure from grouped windows
+   * @private
+   */
+  _finalizeEvent(eventGroup, eventId, pcmData) {
+    const wins = eventGroup.windows;
+    const start = wins[0].startTime;
+    let end = start;
+    let sumProb = 0;
+    let maxProb = 0;
+    
+    for (const win of wins) {
+      end = Math.max(end, win.endTime);
+      const prob = win.probabilities[2]; // P(Inhale)
+      sumProb += prob;
+      if (prob > maxProb) maxProb = prob;
+    }
+    
+    const duration = end - start;
+    const meanProb = sumProb / wins.length;
+    
+    return {
+      eventId: eventId,
+      startS: start,
+      endS: end,
+      durationS: duration,
+      detectorConfidence: meanProb,
+      detectorMaxConfidence: maxProb,
+      windowPredictions: wins,
+      // Metadata/Results populated in later stages
+      scoreable: false,
+      notScoreableReasons: [],
+      eventFeatures: null,
+      score: null
+    };
   }
 
   /**

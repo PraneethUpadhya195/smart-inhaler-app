@@ -433,3 +433,47 @@ Validate the entire extraction and inference pipeline natively in JS using real 
 - **Python Windows / JS Windows:** 176 / 176
 - **First Window Logit MAE:** 0.000044
 - **Last Window Logit MAE:** 0.0000007
+
+<br><br>
+
+---
+
+# Stage 08 — Temporal Event Decoder
+
+## Status: COMPLETE
+
+## Date: 2026-10-01
+
+## Objective
+Implement heuristic event grouping to convert sequential independent CNN `Inhale` window predictions into coherent, continuous physical inhalation interval events.
+
+## What Was Done
+- Implemented `decodeEvents(predictions, pcmData)` in `pipeline/InferencePipeline.js` according exactly to the `inference_contract_v2.json` schema.
+- Built filtering logic to isolate ONLY target-label (`Inhale`, Class 2) prediction windows.
+- Developed sequential grouping logic matching the python post-processor:
+  - "A window joins the current event while its start <= the latest end of the event's windows."
+  - Handled floating-point tolerance safely (`+ 1e-6`).
+  - Tracked and aggregated `startS`, `endS`, and `durationS`.
+- Computed probabilistic confidences natively per event:
+  - `detectorConfidence`: Mean P(Inhale) across the constituent overlapping windows.
+  - `detectorMaxConfidence`: Max P(Inhale) across the constituent windows.
+- Wrote and executed a testing suite (`pipeline/test_decoder.js`) ensuring that sequential overlaps string together correctly into single events, while gaps naturally split the timeline into consecutive independent physical events.
+
+## Key Decisions
+- **Eager Aggregation vs Deferred Processing**: Grouping logic and probability statistics (mean/max) are evaluated eagerly in `_finalizeEvent`, avoiding having to iterate over window arrays later in the pipeline.
+
+## Files Changed/Created
+- `pipeline/InferencePipeline.js` — Core `decodeEvents` grouping logic implemented.
+- `pipeline/test_decoder.js` (Created/Tested) — Synthetic validation for the event clustering algorithm.
+
+## Acceptance Criteria Met
+- [x] Reproduces Python post-event grouping logic.
+- [x] Given identical window predictions, generates same event intervals (verified via synthetic overlapping fixtures).
+- [x] Accurately tracks boundaries, durations, and confidence aggregations.
+
+## Known Issues / Notes for Next Stage
+- Now that we know *when* the inhalations occur (Start & End), Stage 9 (Whole Inhale Event Extraction) will slice out those exact audio ranges to produce dedicated PCM sub-segments ready for quality grading and feature extraction.
+
+## Test Results
+- **Overall Result:** SUCCESS.
+- Assertions strictly confirmed that overlapping CNN windows seamlessly join into single logical events spanning the combined timeframe, while gaps properly spawn distinct events with sequential `eventId` tracking.
