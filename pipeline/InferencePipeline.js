@@ -354,8 +354,25 @@ export default class InferencePipeline {
    * @returns {Float32Array} Event PCM samples
    */
   extractEventPcm(event, pcmData) {
-    // TODO: Stage 9 — Whole Inhale Event Extraction
-    throw new Error("extractEventPcm() not yet implemented (Stage 9).");
+    const sr = pcmData.sampleRate;
+    
+    // Calculate sample indices
+    let startIdx = Math.floor(event.startS * sr);
+    let endIdx = Math.ceil(event.endS * sr);
+    
+    // Clamp to valid range
+    startIdx = Math.max(0, startIdx);
+    endIdx = Math.min(pcmData.samples.length, endIdx);
+    
+    // Ensure valid slice
+    if (startIdx >= endIdx) {
+      return new Float32Array(0);
+    }
+    
+    // Return a copy or view? subarray creates a view (no allocation overhead).
+    // Using slice() creates a copy, but subarray() is more efficient and safe
+    // as long as we only read it in subsequent stages.
+    return pcmData.samples.subarray(startIdx, endIdx);
   }
 
   /**

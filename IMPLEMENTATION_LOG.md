@@ -477,3 +477,41 @@ Implement heuristic event grouping to convert sequential independent CNN `Inhale
 ## Test Results
 - **Overall Result:** SUCCESS.
 - Assertions strictly confirmed that overlapping CNN windows seamlessly join into single logical events spanning the combined timeframe, while gaps properly spawn distinct events with sequential `eventId` tracking.
+
+<br><br>
+
+---
+
+# Stage 09 — Whole Inhale Event Extraction
+
+## Status: COMPLETE
+
+## Date: 2026-10-01
+
+## Objective
+Convert logical decoded temporal event intervals into physical subsets of the original raw audio stream, extracting the exact PCM frames that constitute a recognized inhalation for downstream score processing.
+
+## What Was Done
+- Implemented `extractEventPcm(event, pcmData)` in `pipeline/InferencePipeline.js`.
+- Performed precision mapping converting continuous `startS` and `endS` seconds back to discrete array indices using `Math.floor` and `Math.ceil` against the native sampling rate (`8000 Hz`).
+- Handled out-of-bounds safety clamping on start and end indices.
+- Utilized `Float32Array.subarray(startIdx, endIdx)` to create a fast, zero-allocation memory view over the original array rather than duplicating large audio buffers.
+- Verified exact sample extraction using a synthetic index-mapped dummy stream via `pipeline/test_event_pcm.js`.
+
+## Key Decisions
+- **Zero-Copy Views**: We specifically used `subarray()` instead of `slice()`. Since the original PCM buffer is static across the pipeline execution, pulling views avoids costly memory garbage collection passes on mobile when parsing lengthy recordings containing many events.
+
+## Files Changed/Created
+- `pipeline/InferencePipeline.js` — Implemented `extractEventPcm`.
+- `pipeline/test_event_pcm.js` (Created/Tested) — Index accuracy test script.
+
+## Acceptance Criteria Met
+- [x] PCM extraction isolates the precise window of samples determined by the decoder.
+- [x] Event count, start, end, and duration mapped cleanly.
+
+## Known Issues / Notes for Next Stage
+- With the raw PCM in hand for each isolated inhalation, Stage 10 (Versioned Event-Feature Engine) will compute the analytical acoustic metrics on this segment needed for clinical baselining.
+
+## Test Results
+- **Overall Result:** SUCCESS.
+- The dummy index test confirmed that an event from `0.1s` to `0.5s` correctly sliced out exactly `3200` samples spanning the physical offsets `[800, 3999]`.
