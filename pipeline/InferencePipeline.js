@@ -77,7 +77,7 @@ export default class InferencePipeline {
     // 7. For each event: extract features, check scoreability, score
     const eventResults = [];
     for (const event of events) {
-      const eventResult = await this.processEvent(event, pcmData);
+      const eventResult = await this.processEvent(event, events, pcmData);
       eventResults.push(eventResult);
     }
 
@@ -323,10 +323,11 @@ export default class InferencePipeline {
    * scoreability check, and anomaly scoring.
    *
    * @param {import('./types').DecodedEvent} event
+   * @param {import('./types').DecodedEvent[]} allEvents
    * @param {import('./types').PcmData} pcmData
    * @returns {Promise<import('./types').EventResult>}
    */
-  async processEvent(event, pcmData) {
+  async processEvent(event, allEvents, pcmData) {
     // 9. Extract event PCM segment
     const eventPcm = this.extractEventPcm(event, pcmData);
 
@@ -334,14 +335,14 @@ export default class InferencePipeline {
     const features = await this.extractEventFeatures(eventPcm);
 
     // 7. Check scoreability (Stage 1 usability rule)
-    const scoreability = this.checkScoreability(event, pcmData, features);
+    const scoreability = this.checkScoreability(event, allEvents, pcmData, features);
 
     if (!scoreability.isScoreable) {
       return this._notScoreableEventResult(event, scoreability, features);
     }
 
     // 12. Score against baseline
-    const scoring = this.scoreEvent(features);
+    const scoring = await this.scoreEvent(features);
 
     return this._scoredEventResult(event, features, scoring);
   }
@@ -393,24 +394,88 @@ export default class InferencePipeline {
    * Stage 7 (scoreability): Check if an event passes the usability rule.
    *
    * @param {import('./types').DecodedEvent} event
+   * @param {import('./types').DecodedEvent[]} allEvents
    * @param {import('./types').PcmData} pcmData
    * @param {import('./types').EventFeatures} features
    * @returns {import('./types').EventScoreability}
    */
-  checkScoreability(event, pcmData, features) {
-    // TODO: Will be implemented alongside event features
-    throw new Error("checkScoreability() not yet implemented.");
+  checkScoreability(event, allEvents, pcmData, features) {
+    const reasons = [];
+    
+    // 1. nonfinite_feature
+    let hasNonFinite = !isFinite(features.mean_rms);
+    for (let i = 0; i < features.features.length; i++) {
+        if (!isFinite(features.features[i])) hasNonFinite = true;
+    }
+    if (hasNonFinite) reasons.push("nonfinite_feature");
+    
+    // 2. short_duration (round to 6 decimals)
+    const durationS = Math.round(event.durationS * 1e6) / 1e6;
+    if (durationS < 0.5) reasons.push("short_duration");
+    
+    // 3. close_neighbor
+    let closeNeighbor = false;
+    for (const other of allEvents) {
+        if (other.eventId === event.eventId) continue;
+        // Check if other is after this
+        if (other.startS >= event.endS) {
+            const gap = Math.round((other.startS - event.endS) * 1e6) / 1e6;
+            if (gap < 0.2) closeNeighbor = true;
+        }
+        // Check if other is before this
+        if (event.startS >= other.endS) {
+            const gap = Math.round((event.startS - other.endS) * 1e6) / 1e6;
+            if (gap < 0.2) closeNeighbor = true;
+        }
+    }
+    if (closeNeighbor) reasons.push("close_neighbor");
+    
+    // 4. recording_boundary
+    const recDuration = pcmData.samples.length / pcmData.sampleRate;
+    if (event.startS <= 0.008 || event.endS >= recDuration - 0.008) {
+        reasons.push("recording_boundary");
+    }
+    
+    return {
+        isScoreable: reasons.length === 0,
+        reasons: reasons
+    };
   }
 
   /**
    * Stage 12: Compute anomaly score against the baseline.
    *
    * @param {import('./types').EventFeatures} features
-   * @returns {{ anomalyScore: number, featureZScores: import('./types').FeatureZScores }}
+   * @returns {Promise<{ anomalyScore: number, featureZScores: import('./types').FeatureZScores }>}
    */
-  scoreEvent(features) {
-    // TODO: Stage 12 — Score-Only Anomaly Engine
-    throw new Error("scoreEvent() not yet implemented (Stage 12).");
+  async scoreEvent(features) {
+    if (!this._baselineStore) {
+        const { default: BaselineStore } = await import('./BaselineStore.js');
+        this._baselineStore = new BaselineStore();
+        await this._baselineStore.loadBaseline();
+    }
+    const baseline = this._baselineStore.getBaseline(features.version);
+    
+    // Calculate z-scores
+    const zScores = new Float64Array(features.features.length);
+    let sumZ2 = 0;
+    
+    for (let i = 0; i < features.features.length; i++) {
+        const val = features.features[i];
+        const center = baseline.centers[i];
+        const scale = baseline.scales[i];
+        
+        const z = (val - center) / scale;
+        zScores[i] = z;
+        sumZ2 += z * z;
+    }
+    
+    const anomalyScore = Math.sqrt(sumZ2 / features.features.length);
+    
+    return {
+        anomalyScore,
+        featureZScores: zScores
+    };
   }
 
   // ─── Result Builders ───────────────────────────────────────────────────────

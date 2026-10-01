@@ -596,3 +596,47 @@ Implement personalized baseline storage and lookup mechanisms to provide referen
 ## Test Results
 - **Overall Result:** SUCCESS.
 - Baseline `prism-v2-global-2026-09-30` successfully parsed `prism-inference-v2.0` schema definitions and correctly populated exactly 4 float parameters representing the normative bounds.
+
+<br><br>
+
+---
+
+# Stage 12 — Score-Only Anomaly Engine
+
+## Status: COMPLETE
+
+## Date: 2026-10-01
+
+## Objective
+Implement the critical usability constraints (Scoreability Rule V1) to prevent artifact scoring, and apply the final `sqrt(mean(z²))` statistical anomaly equation against the patient's baseline for valid events.
+
+## What Was Done
+- Modified `InferencePipeline.js` to correctly route all detected events into the `checkScoreability` step prior to baseline evaluation.
+- Implemented the rigid Stage 1 usability rule constraints in `checkScoreability`:
+  - `short_duration`: Excludes any events with a duration `< 0.5s` (rounded to 6 decimal places).
+  - `close_neighbor`: Excludes events occurring within `< 0.2s` of another valid event.
+  - `recording_boundary`: Excludes events intersecting the first or last `0.008s` of the recording (buffer edge effects).
+  - `nonfinite_feature`: Excludes events yielding `NaN` or `Infinity` during Feature Extraction (Stage 10).
+- Implemented `scoreEvent(features)` executing `z_j = (x_j - center_j) / scale_j` over the four V2 dimensions natively in `Float64`.
+- Calculated the final `anomalyScore = sqrt(mean_j(z_j^2))` mathematically penalizing extreme deviations in single parameters rather than linear offsets.
+- Verified exact scoring outcomes (`0.0` at median and `1.0` at a 1-Scale offset) using synthetic inputs in `pipeline/test_score.js`.
+
+## Key Decisions
+- **Eager Filtering / Lazy Loading**: By performing Scoreability checks synchronously *before* invoking `scoreEvent`, we prevent unnecessary async dynamic loading of the Baseline Engine for events that are immediately disqualified due to timing boundary rules.
+
+## Files Changed/Created
+- `pipeline/InferencePipeline.js` — Core scoreability constraints and `scoreEvent` math implemented.
+- `pipeline/test_score.js` (Created/Tested) — Validation suite for timing constraints and Z-score derivation.
+
+## Acceptance Criteria Met
+- [x] Unusable artifact events are properly shunted into the `NOT_SCOREABLE` state with specific logged reasons.
+- [x] Standardized Deviation computation maps deterministically to the contract formula.
+- [x] Score outputs exactly `0.0` for perfectly healthy baseline behavior.
+
+## Known Issues / Notes for Next Stage
+- With the pipeline now functionally complete and evaluating scores properly, Stage 13 (Session Aggregation) will handle combining multiple discrete `SCORE_ONLY` events logged in a short timespan (a single real-world clinical session) into a cohesive summary.
+
+## Test Results
+- **Overall Result:** SUCCESS.
+- The constraint system successfully detected overlapping neighbors (0.1s gap), boundary violations, and short events (0.3s) and marked them `NOT_SCOREABLE`. 
+- An event exactly 1-scale offset from the baseline returned an exact anomaly score of `1.0`.
