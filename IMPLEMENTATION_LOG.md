@@ -640,3 +640,45 @@ Implement the critical usability constraints (Scoreability Rule V1) to prevent a
 - **Overall Result:** SUCCESS.
 - The constraint system successfully detected overlapping neighbors (0.1s gap), boundary violations, and short events (0.3s) and marked them `NOT_SCOREABLE`. 
 - An event exactly 1-scale offset from the baseline returned an exact anomaly score of `1.0`.
+
+<br><br>
+
+---
+
+# Stage 13 — Session Aggregation
+
+## Status: COMPLETE
+
+## Date: 2026-10-01
+
+## Objective
+Provide a unified structure for grouping multiple discrete inference pipeline executions (recordings) that occurred within the same physical dosing session window into a single comprehensive result object.
+
+## What Was Done
+- Implemented `pipeline/SessionAggregator.js` containing an `aggregate` algorithm.
+- Ensured deterministic pooling of independent `RecordingResult` payloads:
+  - Preserved metadata like `recordingId` and `recordedAt` natively onto each sub-event for traceability.
+  - Sorted all combined sub-events globally by chronological timestamps.
+  - Aggregated overall status states prioritizing `HAS_ERRORS` over `SCORED` over `EVENTS_DETECTED_NOT_SCOREABLE`.
+  - Extracted global mathematical aggregates across all valid scored events within the session (`min`, `max`, and `mean` anomaly scores).
+- Respected clinical constraints by keeping output purely quantitative (e.g., providing raw aggregate numbers, refusing to classify "best" or "worst" technique or apply thresholds).
+- Created `test_session.js` which validated that three mixed recording payloads (two valid, one erroneous) merge cleanly into a unified object with `status = 'HAS_ERRORS'` while still perfectly retaining the 2 scored events and calculating accurate mean bounds.
+
+## Key Decisions
+- **Statistical Aggregation over Selection**: Instead of forcing the app to choose a "primary" event from a session to represent the patient's dose, the module safely aggregates all math (`minScore`, `maxScore`, `meanScore`) leaving the decision of which metric to plot on UI dashboards to the presentation layer later.
+
+## Files Changed/Created
+- `pipeline/SessionAggregator.js` (Created) — Session-level grouping.
+- `pipeline/test_session.js` (Created/Tested) — Validation suite for aggregation logic.
+
+## Acceptance Criteria Met
+- [x] Defined deterministic event aggregation.
+- [x] Extracted numbers, durations, errors without inventing clinical meaning.
+- [x] Maintained analytical provenance via context-injections on event items.
+
+## Known Issues / Notes for Next Stage
+- The underlying Data/ML framework is now fully complete! The processing backend works end-to-end. Next, we will hook this native JS pipeline into the React Native frontend application (Stage 14) and wire it into real UI elements.
+
+## Test Results
+- **Overall Result:** SUCCESS.
+- Correctly parsed 3 dummy recordings, calculating a combined mean anomaly score of `1.0` between the two scoreable events, and trapping the error message from the third failed recording.
