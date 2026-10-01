@@ -26,6 +26,10 @@ export class DspEngine {
     this.dct_basis = DSP_CONSTANTS.dct_basis;
     this.delta_1 = DSP_CONSTANTS.delta_1;
     this.delta_2 = DSP_CONSTANTS.delta_2;
+    this.edge_start_1 = DSP_CONSTANTS.edge_start_1;
+    this.edge_end_1 = DSP_CONSTANTS.edge_end_1;
+    this.edge_start_2 = DSP_CONSTANTS.edge_start_2;
+    this.edge_end_2 = DSP_CONSTANTS.edge_end_2;
     this.hann_window = DSP_CONSTANTS.hann_window;
     this.fft_freqs = DSP_CONSTANTS.fft_frequencies;
   }
@@ -168,8 +172,8 @@ export class DspEngine {
     }
     
     // C. Deltas
-    const deltas = this._computeDeltas(mfccs, this.delta_1);
-    const deltaDeltas = this._computeDeltas(mfccs, this.delta_2);
+    const deltas = this._computeDeltas(mfccs, this.delta_1, this.edge_start_1, this.edge_end_1);
+    const deltaDeltas = this._computeDeltas(mfccs, this.delta_2, this.edge_start_2, this.edge_end_2);
     
     // D. Zero Crossing Rate (frame 2048, hop 64, center=True)
     const zcrs = this._computeZCR(pcm, numFrames);
@@ -211,9 +215,11 @@ export class DspEngine {
    * Compute Savitzky-Golay deltas matching scipy.signal.savgol_filter mode='interp'.
    * @param {Float32Array[]} data [numFrames][40]
    * @param {number[]} weights FIR filter weights (length 9)
+   * @param {number[][]} edge_start Matrix [4][9] of boundary filters
+   * @param {number[][]} edge_end Matrix [4][9] of boundary filters
    * @returns {Float32Array[]} [numFrames][40]
    */
-  _computeDeltas(data, weights) {
+  _computeDeltas(data, weights, edge_start, edge_end) {
     const numFrames = data.length;
     const numFeats = data[0].length;
     const halfWindow = Math.floor(weights.length / 2);
@@ -221,21 +227,31 @@ export class DspEngine {
     
     for (let i = 0; i < numFrames; i++) {
       out[i] = new Float32Array(numFeats);
+      
+      let isStartEdge = (i < halfWindow);
+      let isEndEdge = (i >= numFrames - halfWindow);
+      
       for (let f = 0; f < numFeats; f++) {
         let sum = 0;
-        for (let w = 0; w < weights.length; w++) {
-          let idx = i + w - halfWindow;
-          // Edge padding logic: librosa mode='interp' (interp is complex, but in practice, 
-          // librosa uses savgol_filter which interpolates at the edges by fitting a polynomial.
-          // For simplicity in JS without a full polynomial fitter, librosa delta default padding 
-          // historically matched nearest or mirror if 'interp' wasn't perfectly implemented in JS.
-          // However, we'll implement simple edge repeating (nearest) to approximate it, 
-          // or we can just mirror. Let's use mirror for now, though interp might differ slightly at edges.
-          // Actually, librosa delta uses edge-padding (nearest). Wait, mode='interp' means it fits a polynomial.
-          // The difference is only at the first 4 and last 4 frames.
-          if (idx < 0) idx = 0;
-          if (idx >= numFrames) idx = numFrames - 1;
-          sum += data[idx][f] * weights[w];
+        if (isStartEdge) {
+          // Multiply first 9 frames by edge_start[i]
+          const edgeWeights = edge_start[i];
+          for (let w = 0; w < 9; w++) {
+            sum += data[w][f] * edgeWeights[w];
+          }
+        } else if (isEndEdge) {
+          // Multiply last 9 frames by edge_end[i - (numFrames - halfWindow)]
+          const row = i - (numFrames - halfWindow);
+          const edgeWeights = edge_end[row];
+          for (let w = 0; w < 9; w++) {
+            sum += data[numFrames - 9 + w][f] * edgeWeights[w];
+          }
+        } else {
+          // Inner frames standard convolution
+          for (let w = 0; w < weights.length; w++) {
+            let idx = i - w + halfWindow;
+            sum += data[idx][f] * weights[w];
+          }
         }
         out[i][f] = sum;
       }
