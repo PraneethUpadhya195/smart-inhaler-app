@@ -202,3 +202,56 @@ Prove that the actual ONNX model (`inhaler_cnn.onnx`) can execute in the mobile 
 - **Logits:** `[-4.917, -6.989, 2.519, 5.813]`
 - **Probabilities:** `[~0.00002, ~0.000002, ~0.035, ~0.964]`
 - **Predicted Class:** `3 (Noise)`
+
+<br><br>
+
+---
+
+# Stage 03 — Mobile DSP Engine
+
+## Status: COMPLETE
+
+## Date: 2026-10-01
+
+## Objective
+Implement PCM-to-124-feature extraction exactly matching the Librosa-based Python reference implementation (without inventing new parameters or normalizations).
+
+## What Was Done
+- Installed `fft.js` for fast 1D Fourier Transforms on device.
+- Wrote a Python extraction script (`generate_dsp_constants.py`) utilizing `librosa` and `scipy` to extract the exact matrices for the Mel filterbank, the orthogonal DCT basis, the Savitzky-Golay delta filter coefficients, and the periodic Hann window.
+- Converted these extracted constants into a javascript file (`pipeline/dsp_constants.js`).
+- Implemented `pipeline/dsp.js` (`DspEngine`) which performs the exact sequential extraction:
+  - Constant edge-padding by `n_fft // 2`.
+  - Frame iteration, Hann windowing, and `fft.js` complex extraction.
+  - Magnitude and Power spectrum computation.
+  - Spectral feature calculations (Centroid, Flatness, 0.85 Rolloff) properly normalized to 4000Hz.
+  - Matrix multiplication against the pre-computed Mel filterbank.
+  - Full-segment maximum reference computation for `power_to_db` (matching Librosa's global thresholding behavior).
+  - Orthogonal DCT computation.
+  - Delta and Delta-Delta feature calculation over the sequential MFCCs using Savitzky-Golay FIR filtering.
+  - Correct implementation of Librosa's default Zero-Crossing Rate (using a 2048 window applied to the time domain, mean boolean crossing checks).
+- Updated `pipeline/InferencePipeline.js`'s `extractFrameFeatures` method to lazily load and utilize `DspEngine`.
+
+## Key Decisions
+- **Avoided manual array approximations**: By dumping the Librosa/SciPy basis matrices directly to JSON, we ensured that complicated math operations (like building exactly the Slaney mel scale or the orthogonal DCT-II matrix) are mathematically identical to the Python pipeline.
+- **Global `power_to_db` Logic**: Carefully implemented the logic for `power_to_db` to track the maximum mel power across *all* frames before normalizing. Doing this per-frame is a common DSP integration mistake that ruins baseline compatibility.
+
+## Files Changed/Created
+- `package.json` — Added `fft.js`.
+- `generate_dsp_constants.py` (Created) — Python script for constant extraction.
+- `pipeline/dsp_constants.js` (Created) — JS implementation of the constants.
+- `pipeline/dsp.js` (Created) — Core DSP engine replicating Librosa.
+- `pipeline/InferencePipeline.js` — Updated `extractFrameFeatures`.
+- `pipeline/test_dsp.js` (Created/Tested) — Validation of 124-dim output structure.
+
+## Acceptance Criteria Met
+- [x] Implement the exact research preprocessing (STFT → Mel → MFCC → Deltas → Spectral → ZCR).
+- [x] Ensure FFT parameters, padding, DCT conventions, and normalizations match reference.
+- [x] The engine produces deterministic 124-dimensional float32 feature vectors.
+
+## Known Issues / Notes for Next Stage
+- While the logic is structurally matching Librosa, exact float32 numerical parity must be proven. Stage 4 will perform absolute validation comparing actual python outputs against the JS outputs to guarantee an MAE < 0.001.
+
+## Test Results
+- `test_dsp.js` ran successfully. 0.5s of audio (4000 samples) produced exactly 63 frames.
+- First frame feature count correctly assembled as `124`.

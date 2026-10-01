@@ -94,8 +94,12 @@ export default class InferencePipeline {
    * @returns {Promise<import('./types').FrameFeatures[]>}
    */
   async extractFrameFeatures(pcmData) {
-    // TODO: Stage 3 — Mobile DSP Engine
-    throw new Error("extractFrameFeatures() not yet implemented (Stage 3).");
+    if (!this._dspEngine) {
+      // Lazy load to avoid importing DSP constants if not needed
+      const { DspEngine } = await import('./dsp.js');
+      this._dspEngine = new DspEngine();
+    }
+    return this._dspEngine.processPcm(pcmData.samples);
   }
 
   /**
