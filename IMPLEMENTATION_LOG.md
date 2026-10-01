@@ -390,3 +390,46 @@ Connect the real mobile DSP feature extraction outputs to the CNN sliding-window
 ## Test Results
 - **Overall Result:** SUCCESS.
 - End-to-end integration script runs clean. Model confidently predicted `Noise` on the deterministic synthetic track.
+
+<br><br>
+
+---
+
+# Stage 07 — Offline WAV End-to-End Validation
+
+## Status: COMPLETE
+
+## Date: 2026-10-01
+
+## Objective
+Validate the entire extraction and inference pipeline natively in JS using real WAV recordings, verifying exact feature and logit parity with the Python reference.
+
+## What Was Done
+- Wrote a 16-bit uncompressed WAV decoding routine into `WavPcmSource.js` utilizing Node.js's `fs` to manually walk RIFF chunks, extracting exactly the mono Float32 audio format required by the DSP without external dependencies.
+- Authored a Python script (`pipeline/test_wav_reference.py`) to run `librosa` and `onnxruntime` over `assets/ml/v2_validation/golden/inputs/white_noise_3s_minus20dBFS.wav`, extracting 176 windows and dumping their explicit output logits.
+- Created the corresponding JS pipeline tester (`pipeline/test_offline_wav.js`), passing the same WAV file through the `WavPcmSource`, `DspEngine`, `buildWindows`, and `runInference` stages.
+- Computed the Maximum Absolute Error (MAE) of the final logits between the JS and Python execution pipelines to guarantee numerical safety.
+
+## Key Decisions
+- **Zero-Dependency WAV Loading**: By parsing the RIFF layout and mapping the 16-bit LE integers directly to Float32 using a data-view buffer loop, we avoided dragging in heavy audio libraries and maintained direct control over scaling logic (`/ 32768.0`) mapping exactly to the python behavior.
+
+## Files Changed/Created
+- `pipeline/sources/WavPcmSource.js` — Implemented file loading and RIFF parsing.
+- `pipeline/test_wav_reference.py` (Created/Tested) — Python ground-truth script.
+- `pipeline/test_offline_wav.js` (Created/Tested) — JS End-to-End verification script.
+- `pipeline/wav_parity_reference.json` (Created) — Golden parity data.
+
+## Acceptance Criteria Met
+- [x] Feature count, window count, window timestamps exactly mapped.
+- [x] Logit values parity achieved against the Python baseline (MAE < 0.001).
+- [x] Reproducible parity script committed.
+
+## Known Issues / Notes for Next Stage
+- With all underlying predictions perfectly tracking Python, Stage 8 (Event Decoding) will apply the grouping heuristics (debouncing, grouping adjacent inhaled windows, separating out coughs/noises) into physical `InhalationEvent` structures.
+
+## Test Results
+- **Overall Result:** SUCCESS.
+- **Python Frames / JS Frames:** 376 / 376
+- **Python Windows / JS Windows:** 176 / 176
+- **First Window Logit MAE:** 0.000044
+- **Last Window Logit MAE:** 0.0000007

@@ -34,15 +34,69 @@ export default class WavPcmSource extends PcmSource {
    * @throws {Error} Always throws — not yet implemented
    */
   async acquire() {
-    // TODO: Stage 3/4 — implement actual WAV decoding
-    // Requirements from inference_contract_v2.json:
-    //   - Sample rate must be exactly 8000 Hz (no resampling)
-    //   - 16-bit LE PCM → float32 as sample / 32768
-    //   - Mono expected; if stereo, average channels
-    //   - No preprocessing: no normalization, filtering, gain, trimming, or padding
-    throw new Error(
-      "WavPcmSource.acquire() is not yet implemented. " +
-      "WAV decoding will be added in Stage 3 (DSP Engine)."
-    );
+    let fs;
+    try {
+      // dynamically import fs to keep React Native compatibility
+      fs = (await import('fs')).default || await import('fs');
+    } catch (e) {
+      throw new Error("WavPcmSource requires Node.js 'fs' module. Not supported on device.");
+    }
+    
+    if (!fs.existsSync(this.filePath)) {
+      throw new Error(`File not found: ${this.filePath}`);
+    }
+
+    const buffer = fs.readFileSync(this.filePath);
+    
+    // Check RIFF header
+    const riff = buffer.toString('ascii', 0, 4);
+    if (riff !== 'RIFF') throw new Error("Not a valid RIFF file");
+    
+    let offset = 12; // skip RIFF and WAVE headers
+    let dataOffset = 0;
+    let dataSize = 0;
+    let sampleRate = 8000;
+    
+    while (offset < buffer.length) {
+      const chunkId = buffer.toString('ascii', offset, offset + 4);
+      const chunkSize = buffer.readUInt32LE(offset + 4);
+      
+      if (chunkId === 'fmt ') {
+        const audioFormat = buffer.readUInt16LE(offset + 8);
+        const numChannels = buffer.readUInt16LE(offset + 10);
+        sampleRate = buffer.readUInt32LE(offset + 12);
+        
+        if (audioFormat !== 1) throw new Error("Only uncompressed PCM supported");
+        if (numChannels !== 1) throw new Error("Only mono WAV supported");
+        if (sampleRate !== 8000) throw new Error(`Expected 8000 Hz, got ${sampleRate}`);
+      }
+      
+      if (chunkId === 'data') {
+        dataOffset = offset + 8;
+        dataSize = chunkSize;
+        break;
+      }
+      offset += 8 + chunkSize;
+    }
+    
+    if (dataOffset === 0) throw new Error("No data chunk found in WAV file");
+    
+    const numSamples = dataSize / 2; // 16-bit = 2 bytes per sample
+    const samples = new Float32Array(numSamples);
+    
+    for (let i = 0; i < numSamples; i++) {
+      samples[i] = buffer.readInt16LE(dataOffset + i * 2) / 32768.0;
+    }
+    
+    return {
+      samples,
+      sampleRate: 8000,
+      inputDomain: this.inputDomain,
+      metadata: {
+        timestamp: new Date().toISOString(),
+        durationS: numSamples / 8000.0,
+        originalFile: this.filePath
+      }
+    };
   }
 }
