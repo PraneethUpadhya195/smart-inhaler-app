@@ -116,8 +116,83 @@ export default class InferencePipeline {
    * @returns {Promise<import('./types').WindowPrediction[]>}
    */
   async runInference(windows) {
-    // TODO: Stage 2 — ONNX Runtime Smoke Test
-    throw new Error("runInference() not yet implemented (Stage 2).");
+    if (windows.length === 0) return [];
+
+    // Dynamically require ONNX runtime to avoid breaking Node.js test scripts
+    // that don't have React Native environment. In a real RN app, this uses
+    // onnxruntime-react-native. In Node, it falls back to onnxruntime-node.
+    let ort;
+    try {
+      if (typeof navigator !== 'undefined' && navigator.product === 'ReactNative') {
+        ort = require('onnxruntime-react-native');
+      } else {
+        ort = require('onnxruntime-node');
+      }
+    } catch (e) {
+      throw new Error(`Failed to load ONNX runtime: ${e.message}`);
+    }
+
+    if (!this._baseline) {
+      // Load model if not loaded (caching the session in a real implementation)
+      // Note: In RN, the model path comes from require(), in Node from a string path.
+      const modelPath = typeof navigator !== 'undefined' && navigator.product === 'ReactNative' 
+        ? require('../assets/ml/inhaler_cnn.onnx') 
+        : './assets/ml/inhaler_cnn.onnx';
+        
+      this._baseline = await ort.InferenceSession.create(modelPath);
+    }
+    
+    const session = this._baseline;
+    const inputName = session.inputNames[0]; // 'features'
+    const outputName = session.outputNames[0]; // 'logits'
+
+    const predictions = [];
+
+    // Process each window
+    for (const window of windows) {
+      // Shape: [1, 25, 124]
+      const tensor = new ort.Tensor('float32', window.tensor, [1, 25, 124]);
+      const feeds = {};
+      feeds[inputName] = tensor;
+
+      const results = await session.run(feeds);
+      const logits = results[outputName].data; // Float32Array(4)
+
+      // Softmax
+      let maxLogit = -Infinity;
+      for (let i = 0; i < logits.length; i++) {
+        if (logits[i] > maxLogit) maxLogit = logits[i];
+      }
+      
+      let sumExp = 0;
+      const probs = new Float32Array(logits.length);
+      for (let i = 0; i < logits.length; i++) {
+        probs[i] = Math.exp(logits[i] - maxLogit);
+        sumExp += probs[i];
+      }
+      
+      let predictedClass = -1;
+      let maxProb = -1;
+      for (let i = 0; i < logits.length; i++) {
+        probs[i] /= sumExp;
+        if (probs[i] > maxProb) {
+          maxProb = probs[i];
+          predictedClass = i;
+        }
+      }
+
+      predictions.push({
+        windowIndex: window.windowIndex,
+        logits: new Float32Array(logits),
+        probabilities: probs,
+        predictedClass: predictedClass,
+        predictedLabel: PIPELINE_CONFIG.classLabels[predictedClass],
+        startTime: window.startTime,
+        endTime: window.endTime,
+      });
+    }
+
+    return predictions;
   }
 
   /**
