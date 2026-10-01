@@ -725,3 +725,48 @@ Connect the native JS processing pipeline to the existing React Native UI withou
 ## Test Results
 - **Overall Result:** SUCCESS.
 - React components updated seamlessly. Simulating a dose triggers the pipeline, extracts the synthetic arrays, calculates z-scores, builds the session, and the UI displays the `Session Aggregates` along with the individual `Event` bounds.
+
+<br><br>
+
+---
+
+# Stage 15 — Permanent WAV Regression Harness
+
+## Status: COMPLETE
+
+## Date: 2026-10-01
+
+## Objective
+Prevent DSP/model regressions by creating a permanent test suite containing synthetic fixtures, representative WAV fixtures, golden feature vectors, window tensors, ONNX outputs, and event score verification logic.
+
+## What Was Done
+- Created `pipeline/test_harness.js`, a unified execution test suite for the entire JS machine learning pipeline.
+- Added a `"test"` script to `package.json` pointing to `node pipeline/test_harness.js`.
+- Implemented 7 distinct test stages:
+  1. **WavPcmSource parsing**: Loads the `white_noise_3s_minus20dBFS.wav` golden fixture and verifies length (24,000 samples).
+  2. **DSP Framing**: Validates feature extraction generates exactly 376 frames.
+  3. **Sliding Windows**: Validates `[25, 124]` strided windows generated precisely 176 instances.
+  4. **ONNX Logit Parity**: Executes `inhaler_cnn.onnx` inference inside `onnxruntime-node` and structurally bounds the output logits against the `librosa`-generated `pipeline/wav_parity_reference.json` down to a `1e-3` tolerance float equality check.
+  5. **Temporal Event Decoding**: Uses synthetic continuous intervals to verify correct detection overlap and duration computations.
+  6. **Golden Z-Scoring**: Passes synthetic sine wave features and mathematically asserts they map correctly back to `mean_rms` and `v2_baseline.json` statistics. Tests scoreability exclusions (`checkScoreability`) using overlapping interval overlaps.
+  7. **Session Aggregation**: Runs a simulated multi-event session through `SessionAggregator.js` to ensure the correct final metric tracking (`nEvents`, `nScored`, and `mean` Z-Score computations).
+
+## Key Decisions
+- **Single Master Script (`test_harness.js`)**: Opted for a unified custom assertion test harness rather than installing heavy `jest` or `mocha` dependencies, keeping the mobile application bundle strictly clean and independent.
+- **Dependency on `wav_parity_reference.json`**: Frozen the absolute mathematical baseline generated natively in python (`test_wav_reference.py`) so the React Native layer is definitively tied to the exact numerical representations used during offline model training.
+
+## Files Changed/Created
+- `pipeline/test_harness.js` — Built the permanent regression suite.
+- `package.json` — Added `"test"` script wrapper.
+
+## Acceptance Criteria Met
+- [x] Permanent test suite created.
+- [x] Includes synthetic fixtures, golden feature/tensor structures, and score verification.
+- [x] A single test command detects numerical regressions (`node pipeline/test_harness.js`).
+
+## Next Steps
+- Stage 16 is for physical hardware (ESP32) and should be skipped for now as we don't have the hardware available. The core software engine is now fully completed, integrated into the UI, tested mathematically, and functionally finished!
+
+## Test Results
+- **Overall Result:** SUCCESS.
+- `node pipeline/test_harness.js` executes 7 distinct stages and prints `✅ ALL REGRESSION TESTS PASSED (100%)`.
