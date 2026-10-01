@@ -102,27 +102,29 @@ export default function DashboardScreen() {
 }
 
 function LastSessionContent({ session }) {
-  const { quality_assessment, event_classification, status } = session;
-  const compositeLabel = quality_assessment?.composite_label;
-  const inhaleDur = event_classification?.inhale_duration_ms;
-  const coordDelay = event_classification?.coordination_delay_ms;
+  const { status, nEvents, nScored, aggregateScores, errors } = session;
 
   return (
     <View style={styles.lastSessionContent}>
-      <ResultBadge label={compositeLabel} />
-      {status === "interrupted" && (
-        <StatusTag type="status" value="interrupted" />
+      <ResultBadge label={status} />
+      {errors && errors.length > 0 && (
+        <StatusTag type="status" value="errors_present" />
       )}
       <View style={styles.statsRow}>
         <MiniStat
-          icon="time-outline"
-          value={formatMs(inhaleDur)}
-          label="Inhale"
+          icon="pulse-outline"
+          value={nEvents || 0}
+          label="Total Events"
         />
         <MiniStat
-          icon="sync-outline"
-          value={formatMs(coordDelay)}
-          label="Coord. Delay"
+          icon="checkmark-done-outline"
+          value={nScored || 0}
+          label="Scored Events"
+        />
+        <MiniStat
+          icon="analytics-outline"
+          value={aggregateScores ? aggregateScores.mean.toFixed(2) : "—"}
+          label="Mean Z-Score"
         />
       </View>
     </View>

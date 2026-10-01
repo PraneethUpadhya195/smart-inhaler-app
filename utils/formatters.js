@@ -102,7 +102,10 @@ export function deriveIssues(event_classification, technique_flags) {
 export function getTodayCompletedCount(sessions) {
   const today = new Date();
   return sessions.filter((s) => {
-    if (s.status !== "complete") return false;
+    // Valid session if it was processed by pipeline
+    if (!["SCORED", "HAS_ERRORS", "EVENTS_DETECTED_NOT_SCOREABLE", "NO_INHALATIONS", "complete"].includes(s.status)) {
+        return false;
+    }
     const ts = s.timestamp instanceof Date ? s.timestamp : new Date(s.timestamp);
     return (
       ts.getDate() === today.getDate() &&

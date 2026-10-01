@@ -16,19 +16,15 @@ export default function SessionDetailScreen({ route }) {
   const { session } = route.params;
   const {
     timestamp,
-    duration,
-    event_classification,
-    quality_assessment,
-    technique_flags,
-    source,
     status,
-    deviceId,
-    model_version,
+    nEvents,
+    nScored,
+    aggregateScores,
+    events,
+    errors,
+    source,
+    deviceId
   } = session;
-
-  const isInterrupted = status === "interrupted";
-  const ec = event_classification || {};
-  const qa = quality_assessment || {};
 
   return (
     <ScrollView
@@ -36,13 +32,12 @@ export default function SessionDetailScreen({ route }) {
       contentContainerStyle={styles.content}
       showsVerticalScrollIndicator={false}
     >
-      {/* Interrupted warning banner */}
-      {isInterrupted && (
+      {/* Errors warning banner */}
+      {errors && errors.length > 0 && (
         <View style={styles.warningBanner}>
           <Text style={styles.warningIcon}>⚠️</Text>
           <Text style={styles.warningText}>
-            This session was interrupted — the device disconnected mid-inhalation.
-            Data may be incomplete.
+            This session contained recording errors: {errors.map(e => e.error).join(', ')}
           </Text>
         </View>
       )}
@@ -50,90 +45,85 @@ export default function SessionDetailScreen({ route }) {
       {/* Result + tags */}
       <View style={[styles.card, SHADOW.card]}>
         <Row label="Result">
-          <ResultBadge label={qa.composite_label} />
+          <ResultBadge label={status} />
         </Row>
         <Row label="Source">
           <StatusTag type="source" value={source} />
         </Row>
-        {isInterrupted && (
-          <Row label="Status">
-            <StatusTag type="status" value="interrupted" />
-          </Row>
-        )}
         <Row label="Timestamp">
           <Text style={styles.value}>{formatTimestamp(timestamp)}</Text>
         </Row>
-        {model_version && (
-          <Row label="Model">
-            <Text style={styles.valueMono}>{model_version}</Text>
-          </Row>
+      </View>
+
+      {/* Aggregate Assessment */}
+      <View style={[styles.card, SHADOW.card]}>
+        <Text style={styles.sectionTitle}>Session Aggregates</Text>
+        <View style={styles.metricsGrid}>
+          <MetricBox
+            label="Total Events"
+            value={nEvents || 0}
+          />
+          <MetricBox
+            label="Scored"
+            value={nScored || 0}
+          />
+        </View>
+        {aggregateScores && (
+          <View style={styles.metricsGrid}>
+            <MetricBox
+              label="Mean Score"
+              value={aggregateScores.mean.toFixed(2)}
+              color={COLORS.primary}
+            />
+            <MetricBox
+              label="Max Score"
+              value={aggregateScores.max.toFixed(2)}
+            />
+          </View>
         )}
       </View>
 
-      {/* Quality Assessment */}
-      <View style={[styles.card, SHADOW.card]}>
-        <Text style={styles.sectionTitle}>Quality Assessment</Text>
-        <View style={styles.metricsGrid}>
-          <MetricBox
-            label="Duration"
-            value={formatDuration(duration)}
-          />
+      {/* Individual Events */}
+      {events && events.length > 0 && (
+        <View style={[styles.card, SHADOW.card]}>
+          <Text style={styles.sectionTitle}>Detected Events</Text>
+          {events.map((ev, idx) => (
+            <View key={idx} style={{ marginBottom: SPACING.md, paddingBottom: SPACING.sm, borderBottomWidth: 1, borderColor: COLORS.border }}>
+              <Text style={{ fontWeight: '700', marginBottom: SPACING.xs }}>Event {ev.eventId} ({ev.status})</Text>
+              
+              <DetailRow
+                icon="time-outline"
+                label="Timeline"
+                value={`${formatDuration(ev.startTime)} to ${formatDuration(ev.endTime)}`}
+              />
+              <DetailRow
+                icon="resize-outline"
+                label="Duration"
+                value={formatDuration(ev.durationS)}
+              />
+              <DetailRow
+                icon="analytics-outline"
+                label="Model Confidence"
+                value={`${Math.round(ev.detectorConfidence * 100)}%`}
+              />
+              
+              {ev.status === 'SCORE_ONLY' && (
+                <DetailRow
+                  icon="stats-chart-outline"
+                  label="Anomaly Score"
+                  value={ev.anomalyScore?.toFixed(3)}
+                  valueColor={COLORS.primary}
+                />
+              )}
+              {ev.status === 'NOT_SCOREABLE' && ev.notScoreableReasons && (
+                <View style={{ marginTop: SPACING.xs }}>
+                  <Text style={{ fontSize: 12, color: COLORS.danger }}>Excluded: {ev.notScoreableReasons.join(', ')}</Text>
+                </View>
+              )}
+            </View>
+          ))}
         </View>
-        <View style={styles.metricsGrid}>
-          <MetricBox
-            label="Deviation"
-            value={qa.deviation_score != null ? qa.deviation_score.toFixed(1) : "—"}
-            color={deviationColor(qa.deviation_score)}
-          />
-          <MetricBox
-            label="Baseline"
-            value={formatDeviationFlag(qa.deviation_flag)}
-            small
-          />
-        </View>
-      </View>
-
-      {/* Event Classification */}
-      <View style={[styles.card, SHADOW.card]}>
-        <Text style={styles.sectionTitle}>Event Classification</Text>
-        <DetailRow
-          icon="medical-outline"
-          label="Drug Detected"
-          value={ec.drug_detected ? "Yes" : "No"}
-          valueColor={ec.drug_detected ? COLORS.success : COLORS.danger}
-        />
-        <DetailRow
-          icon="timer-outline"
-          label="Drug Duration"
-          value={formatMs(ec.drug_duration_ms)}
-        />
-        <DetailRow
-          icon="resize-outline"
-          label="Inhale Duration"
-          value={formatMs(ec.inhale_duration_ms)}
-        />
-        <DetailRow
-          icon="sync-outline"
-          label="Coordination Delay"
-          value={formatMs(ec.coordination_delay_ms)}
-          valueColor={ec.coordination_delay_ms > 500 ? COLORS.warning : undefined}
-        />
-        <DetailRow
-          icon="swap-vertical-outline"
-          label="Pre-Exhale Detected"
-          value={ec.pre_exhale_detected ? "Yes" : "No"}
-          valueColor={ec.pre_exhale_detected ? COLORS.success : COLORS.warning}
-        />
-      </View>
-
-      {/* Technique Issues */}
-      <View style={[styles.card, SHADOW.card]}>
-        <Text style={styles.sectionTitle}>Technique Issues</Text>
-        <IssueList
-          event_classification={event_classification}
-          technique_flags={technique_flags}
-        />
-      </View>
+      )}
 
       {/* Device info */}
       {deviceId && (

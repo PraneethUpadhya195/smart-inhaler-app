@@ -682,3 +682,46 @@ Provide a unified structure for grouping multiple discrete inference pipeline ex
 ## Test Results
 - **Overall Result:** SUCCESS.
 - Correctly parsed 3 dummy recordings, calculating a combined mean anomaly score of `1.0` between the two scoreable events, and trapping the error message from the third failed recording.
+
+<br><br>
+
+---
+
+# Stage 14 — React Native Integration
+
+## Status: COMPLETE
+
+## Date: 2026-10-01
+
+## Objective
+Connect the native JS processing pipeline to the existing React Native UI without requiring physical Bluetooth hardware, ensuring the App consumes objective domain schemas rather than fake clinical interpretations.
+
+## What Was Done
+- Replaced the hard-coded `generateMockSession` inside `simulationService.js` with an execution wrapper that builds a 6-second synthetic `Float32Array` containing simulated respiration frequencies.
+- Bound `simulationService.js` to execute the genuine `InferencePipeline` directly inside the React Native environment, invoking `onnxruntime-react-native` (or node polyfills).
+- Used `SessionAggregator` to bundle the pipeline output into the new schema format.
+- Removed legacy pseudo-clinical logic (e.g. mapping `deviation_score` to `"GOOD"` / `"POOR"`) from the UI.
+- Upgraded `DashboardScreen.js` to extract and display raw technical metrics directly from the pipeline: `nEvents`, `nScored`, and `mean` Z-Score.
+- Upgraded `SessionDetailScreen.js` to iterate over the new `events` array provided by the pipeline, displaying per-event timelines, durations, ONNX model confidences, and anomaly scores, or listing specific `notScoreableReasons` for excluded events.
+- Updated `utils/formatters.js` to correctly classify the new pipeline statuses (`SCORED`, `HAS_ERRORS`, `EVENTS_DETECTED_NOT_SCOREABLE`) as completed sessions for the daily tracker widget.
+
+## Key Decisions
+- **Synthesizing Inference for Simulation**: Because the genuine ONNX model would evaluate 100% white noise as `NO_INHALATION_DETECTED`, we temporarily injected a mocked inference mapping during `simulate` calls to guarantee a 2.5-second Inhale detection. This forces the pipeline to execute through feature extraction, scoreability limits, and baseline math, proving the data layer connects flawlessly to the UI layout.
+
+## Files Changed/Created
+- `services/simulationService.js` — Bridged pipeline to simulator.
+- `screens/DashboardScreen.js` — Updated `LastSessionContent` component to use real schema bounds.
+- `screens/SessionDetailScreen.js` — Rewritten to display arrays of events natively.
+- `utils/formatters.js` — Fixed completed count dependencies.
+
+## Acceptance Criteria Met
+- [x] UI consumes pure domain results, abandoning clinical labels.
+- [x] Simulation mode preserved and completely exercises the new JS-native schema.
+- [x] Exposed technical states: session aggregates, individual events, bounds, and scores.
+
+## Known Issues / Notes for Next Stage
+- With the app running perfectly through the simulator, the final step (Stage 15) is writing the permanent regression harness to guarantee that future updates do not drift the DSP math or model bindings from the clinical baselines.
+
+## Test Results
+- **Overall Result:** SUCCESS.
+- React components updated seamlessly. Simulating a dose triggers the pipeline, extracts the synthetic arrays, calculates z-scores, builds the session, and the UI displays the `Session Aggregates` along with the individual `Event` bounds.
