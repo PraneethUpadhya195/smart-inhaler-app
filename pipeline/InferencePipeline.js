@@ -156,7 +156,7 @@ export default class InferencePipeline {
   async runInference(windows) {
     if (windows.length === 0) return [];
 
-    // Dynamically require ONNX runtime to avoid breaking Node.js test scripts
+    // Dynamically load ONNX runtime to avoid breaking Node.js test scripts
     // that don't have React Native environment. In a real RN app, this uses
     // onnxruntime-react-native. In Node, it falls back to onnxruntime-node.
     let ort;
@@ -164,7 +164,9 @@ export default class InferencePipeline {
       if (typeof navigator !== 'undefined' && navigator.product === 'ReactNative') {
         ort = require('onnxruntime-react-native');
       } else {
-        ort = require('onnxruntime-node');
+        ort = await import('onnxruntime-node');
+        // Handle commonjs module default export if needed
+        if (ort.default) ort = ort.default;
       }
     } catch (e) {
       throw new Error(`Failed to load ONNX runtime: ${e.message}`);
