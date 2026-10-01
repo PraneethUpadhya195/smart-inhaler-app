@@ -557,3 +557,42 @@ Implement event-level analytic feature extraction independently from the frame-l
 ## Test Results
 - **Overall Result:** SUCCESS.
 - Test validated execution of `mean_rms` returning exactly `0.353` for the synthetic 0.5 amplitude sine wave, and correctly structured a 4-dimensional Float64Array for the anomaly inputs.
+
+<br><br>
+
+---
+
+# Stage 11 — Versioned Baseline Infrastructure
+
+## Status: COMPLETE
+
+## Date: 2026-10-01
+
+## Objective
+Implement personalized baseline storage and lookup mechanisms to provide reference clinical norms against which live inhaled events are scored, keeping this infrastructure firmly isolated from the raw computational logic.
+
+## What Was Done
+- Built `BaselineStore.js` to parse and maintain loaded statistical baselines representing the clinical norm for specific hardware and ML model versions.
+- Loaded the pre-calculated `v2_baseline.json` which maps the four anomaly features to their respective population centers (medians) and scales (1.4826 * MAD).
+- Normalized the JSON object dictionaries into highly-efficient contiguous Float64Arrays (`centers`, `scales`, `mads`) indexed identical to the `FeatureExtractor` array outputs, completely eliminating costly dynamic object-key lookups per feature during runtime evaluation loops.
+- Created `test_baseline.js` to verify parsing stability, dimension correctness, and ID-based / Schema-based memory retrieval.
+
+## Key Decisions
+- **Optimized Data Structures**: By flattening `parameters.spectral_centroid_mean.center` into `baseline.centers[0]`, scoring math becomes a trivial SIMD-friendly linear loop (`(feat[i] - center[i]) / scale[i]`) making it heavily optimized for lower-end React Native bridges.
+- **Separation of Concerns**: Storing the baseline lookup logically separately from the scoring mechanism guarantees we can hot-swap user baselines (as they progress in therapy) without reinitializing the ML pipelines.
+
+## Files Changed/Created
+- `pipeline/BaselineStore.js` (Created) — Manages schema-verified clinical baseline sets.
+- `pipeline/test_baseline.js` (Created/Tested) — Integration test verifying object-to-array normalization rules.
+
+## Acceptance Criteria Met
+- [x] Represents `baselineVersion`, `featureSchemaVersion`, dimensions, median, MAD, and update metadata correctly.
+- [x] Loads safely from `assets/ml/v2_validation/v2_baseline.json`.
+- [x] Computation logic intentionally left separated for Stage 12.
+
+## Known Issues / Notes for Next Stage
+- With features extracted (Stage 10) and normative baselines loaded (Stage 11), Stage 12 (Scoreability and Z-Scoring) will unify these pieces. We will compute the final global anomaly score indicating whether the patient's inhalation technique remains consistent with their historical profile.
+
+## Test Results
+- **Overall Result:** SUCCESS.
+- Baseline `prism-v2-global-2026-09-30` successfully parsed `prism-inference-v2.0` schema definitions and correctly populated exactly 4 float parameters representing the normative bounds.
