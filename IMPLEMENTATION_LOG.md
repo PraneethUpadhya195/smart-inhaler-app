@@ -515,3 +515,45 @@ Convert logical decoded temporal event intervals into physical subsets of the or
 ## Test Results
 - **Overall Result:** SUCCESS.
 - The dummy index test confirmed that an event from `0.1s` to `0.5s` correctly sliced out exactly `3200` samples spanning the physical offsets `[800, 3999]`.
+
+<br><br>
+
+---
+
+# Stage 10 — Versioned Event-Feature Engine
+
+## Status: COMPLETE
+
+## Date: 2026-10-01
+
+## Objective
+Implement event-level analytic feature extraction independently from the frame-level DSP engine, adhering directly to the versioned `v2_feature_schema.json` contract provided by the data science team.
+
+## What Was Done
+- Created `pipeline/FeatureExtractor.js` to serve as an independent post-processing engine.
+- Configured the extractor to dynamically load and parse `assets/ml/v2_validation/v2_feature_schema.json` to ensure the structure (versions, names, bounds) always mirrors the strict ML schema without hard-coding assumptions.
+- Re-implemented the specific localized STFT transformations (constant zero-padding, specific boundary conditions) purely on the isolated PCM slice, exactly as specified in the reference docs, avoiding the reuse of the stream-level STFT which possesses different padding characteristics.
+- Extracted `spectral_centroid_mean`, `spectral_flatness_mean`, `spectral_centroid_std`, and `spectral_rolloff_std` by aggregating across the derived frames utilizing population standard deviation (`ddof 0`).
+- Extracted the `mean_rms` level feature using explicit 256-sample frames starting every 64 samples from the event start, as required by the schema.
+- Integrated the extractor seamlessly back into `InferencePipeline.js` via the `extractEventFeatures()` interface.
+- Developed `pipeline/test_feature_extractor.js` to validate correct schema parsing and array generation against a synthetic 440Hz pulse.
+
+## Key Decisions
+- **Decoupled Feature Processing**: Despite `dsp.js` already containing logic for STFTs, we explicitly built a standalone generator for event features. The feature extraction phase applies specific slicing and padding constraints (like calculating RMS amplitude locally) that don't match the continuous sliding window requirements of the primary CNN inference stream.
+
+## Files Changed/Created
+- `pipeline/FeatureExtractor.js` (Created) — The versioned feature implementation.
+- `pipeline/InferencePipeline.js` — Updated `extractEventFeatures` to lazy-load and execute the extractor.
+- `pipeline/test_feature_extractor.js` (Created/Tested) — Validation suite for schema conformity.
+
+## Acceptance Criteria Met
+- [x] Feature-schema layer built and version-aware.
+- [x] Implemented features map exactly to `v2_feature_schema.json`.
+- [x] Synthetic tests demonstrate stable deterministic vectors generated from equivalent PCM payloads.
+
+## Known Issues / Notes for Next Stage
+- With these four V2 features extracted (`[0.110, 0.00008, 0.004, 0.005]`), Stage 11 (Versioned Baseline Infrastructure) will load the patient's pre-computed baseline vectors to determine if these extracted features represent anomalous behavior.
+
+## Test Results
+- **Overall Result:** SUCCESS.
+- Test validated execution of `mean_rms` returning exactly `0.353` for the synthetic 0.5 amplitude sine wave, and correctly structured a 4-dimensional Float64Array for the anomaly inputs.

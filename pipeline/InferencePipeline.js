@@ -382,8 +382,11 @@ export default class InferencePipeline {
    * @returns {Promise<import('./types').EventFeatures>}
    */
   async extractEventFeatures(eventPcm) {
-    // TODO: Stage 10 — Versioned Event-Feature Engine
-    throw new Error("extractEventFeatures() not yet implemented (Stage 10).");
+    if (!this._featureExtractor) {
+      const { FeatureExtractor } = await import('./FeatureExtractor.js');
+      this._featureExtractor = new FeatureExtractor();
+    }
+    return this._featureExtractor.extractFeatures(eventPcm);
   }
 
   /**
