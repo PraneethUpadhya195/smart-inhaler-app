@@ -1,102 +1,72 @@
 /**
  * pipeline/sources/WavPcmSource.js
  *
- * Reads a WAV file and produces PcmData for the inference pipeline.
+ * Produces PcmData from a 16-bit PCM WAV file.
  *
- * STATUS: STUB — actual WAV decoding will be implemented in Stage 3/4
- * when the DSP engine is built. The interface is defined now so that
- * the pipeline architecture is complete.
+ * The decoder (../wav.js) is platform-neutral. The source accepts either:
+ *   - the WAV bytes (Uint8Array | ArrayBuffer): works everywhere, including React Native;
+ *   - a file path (string): Node.js only. The file is read through options.readFile if given,
+ *     otherwise through Node's built-in fs, looked up at run time with
+ *     process.getBuiltinModule so that no `fs` import exists for Metro to bundle.
  *
- * Expected WAV format: 8 kHz, 16-bit signed LE, mono.
- * Conversion: float = int16 / 32768 (per inference contract §input.waveform)
+ * The sample rate is reported as found: a rate other than 8000 Hz is not rejected here but
+ * becomes the contract's INPUT_ERROR `unsupported_sample_rate` in InferencePipeline.run().
+ * Conversion: float32 = int16 / 32768 (contract input.waveform).
  */
 
 import PcmSource from "../PcmSource.js";
+import { decodeWav } from "../wav.js";
+
+function nodeReadFile(path) {
+  const fs = globalThis.process?.getBuiltinModule?.("node:fs");
+  if (!fs) {
+    throw new Error("WavPcmSource: reading a file path needs Node.js; pass the WAV bytes instead");
+  }
+  return new Uint8Array(fs.readFileSync(path));
+}
+
+function baseName(path) {
+  return path.split(/[\\/]/).pop();
+}
 
 export default class WavPcmSource extends PcmSource {
   /**
-   * @param {string} filePath - Path to the WAV file
+   * @param {string|Uint8Array|ArrayBuffer} source - WAV file path (Node) or WAV file bytes
    * @param {Object} [options]
    * @param {string} [options.inputDomain='unknown'] - 'reference_dataset' | 'prism_hardware' | 'unknown'
+   * @param {string|null} [options.sourceId] - recording_id; defaults to the file name for a path, else null
+   * @param {Date|string|null} [options.recordedAt=null] - caller-supplied recording start time (ISO 8601)
+   * @param {(path: string) => Uint8Array} [options.readFile] - file reader for path sources
    */
-  constructor(filePath, options = {}) {
+  constructor(source, options = {}) {
     super("wav");
-    /** @type {string} */
-    this.filePath = filePath;
+    /** @type {string|Uint8Array|ArrayBuffer} */
+    this.source = source;
+    /** @type {string|null} kept for callers of the previous API */
+    this.filePath = typeof source === "string" ? source : null;
     /** @type {string} */
     this.inputDomain = options.inputDomain ?? "unknown";
+    this.sourceId = options.sourceId !== undefined ? options.sourceId : this.filePath ? baseName(this.filePath) : null;
+    this.recordedAt = options.recordedAt ?? null;
+    this.readFile = options.readFile ?? nodeReadFile;
   }
 
   /**
-   * Read and decode the WAV file into PCM samples.
-   *
+   * Read and decode the WAV file.
    * @returns {Promise<import('../types').PcmData>}
-   * @throws {Error} Always throws — not yet implemented
+   * @throws {import('../wav.js').WavDecodeError} if the bytes are not a 16-bit PCM WAV file
    */
   async acquire() {
-    let fs;
-    try {
-      // dynamically import fs to keep React Native compatibility
-      fs = (await import('fs')).default || await import('fs');
-    } catch (e) {
-      throw new Error("WavPcmSource requires Node.js 'fs' module. Not supported on device.");
-    }
-    
-    if (!fs.existsSync(this.filePath)) {
-      throw new Error(`File not found: ${this.filePath}`);
-    }
-
-    const buffer = fs.readFileSync(this.filePath);
-    
-    // Check RIFF header
-    const riff = buffer.toString('ascii', 0, 4);
-    if (riff !== 'RIFF') throw new Error("Not a valid RIFF file");
-    
-    let offset = 12; // skip RIFF and WAVE headers
-    let dataOffset = 0;
-    let dataSize = 0;
-    let sampleRate = 8000;
-    
-    while (offset < buffer.length) {
-      const chunkId = buffer.toString('ascii', offset, offset + 4);
-      const chunkSize = buffer.readUInt32LE(offset + 4);
-      
-      if (chunkId === 'fmt ') {
-        const audioFormat = buffer.readUInt16LE(offset + 8);
-        const numChannels = buffer.readUInt16LE(offset + 10);
-        sampleRate = buffer.readUInt32LE(offset + 12);
-        
-        if (audioFormat !== 1) throw new Error("Only uncompressed PCM supported");
-        if (numChannels !== 1) throw new Error("Only mono WAV supported");
-        if (sampleRate !== 8000) throw new Error(`Expected 8000 Hz, got ${sampleRate}`);
-      }
-      
-      if (chunkId === 'data') {
-        dataOffset = offset + 8;
-        dataSize = chunkSize;
-        break;
-      }
-      offset += 8 + chunkSize;
-    }
-    
-    if (dataOffset === 0) throw new Error("No data chunk found in WAV file");
-    
-    const numSamples = dataSize / 2; // 16-bit = 2 bytes per sample
-    const samples = new Float32Array(numSamples);
-    
-    for (let i = 0; i < numSamples; i++) {
-      samples[i] = buffer.readInt16LE(dataOffset + i * 2) / 32768.0;
-    }
-    
+    const bytes = typeof this.source === "string" ? this.readFile(this.source) : this.source;
+    const { samples, sampleRate, channels } = decodeWav(bytes);
     return {
       samples,
-      sampleRate: 8000,
+      sampleRate,
+      channels,
+      sourceType: this.sourceType,
+      sourceId: this.sourceId,
+      recordedAt: this.recordedAt,
       inputDomain: this.inputDomain,
-      metadata: {
-        timestamp: new Date().toISOString(),
-        durationS: numSamples / 8000.0,
-        originalFile: this.filePath
-      }
     };
   }
 }

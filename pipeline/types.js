@@ -13,6 +13,7 @@
 
 /**
  * Raw PCM audio data from any source (simulation, WAV, BLE).
+ * Also carries `inputDomain`: 'reference_dataset' | 'prism_hardware' | 'unknown' (default 'unknown').
  *
  * @typedef {Object} PcmData
  * @property {Float32Array} samples - PCM samples normalized to [-1, 1]
@@ -80,15 +81,18 @@
  * An inhalation event decoded from consecutive/overlapping Inhale windows.
  * Produced by temporal event grouping (post_event logic).
  *
+ * Internal stage object; run() maps it to the canonical event (start_time, end_time, ...).
+ *
  * @typedef {Object} DecodedEvent
  * @property {number} eventId - 0-based chronological index within the recording
- * @property {number} startTime - Event start in seconds
- * @property {number} endTime - Event end in seconds
- * @property {number} durationS - endTime - startTime
+ * @property {number} startS - Event start in seconds (first window start)
+ * @property {number} endS - Event end in seconds (max window end)
+ * @property {number} durationS - endS - startS
  * @property {number} detectorConfidence - Mean P(Inhale) over the event's Inhale windows
  * @property {number} detectorMaxConfidence - Max P(Inhale) over the event's Inhale windows
  * @property {number} windowCount - Number of Inhale windows in this event
  * @property {number[]} windowIndices - Indices of contributing windows
+ * @property {WindowPrediction[]} windowPredictions - The grouped Inhale windows
  */
 
 // ─── Event Scoreability ──────────────────────────────────────────────────────
@@ -104,7 +108,7 @@
  *
  * @typedef {Object} EventScoreability
  * @property {boolean} isScoreable - true if the event can be scored
- * @property {string[]} notScoreableReasons - Empty if scoreable
+ * @property {string[]} reasons - Contract reasons in contract order; empty if scoreable
  */
 
 // ─── Event-Level Features (V2) ───────────────────────────────────────────────
@@ -118,14 +122,12 @@
  *   2: spectral_centroid_std
  *   3: spectral_rolloff_std
  *
+ * Internal stage object (FeatureExtractor.extractFeatures).
+ *
  * @typedef {Object} EventFeatures
- * @property {string} schemaVersion - e.g. 'prism-inference-v2.0'
- * @property {Object} anomalyFeatures - The 4 V2 features
- * @property {number} anomalyFeatures.spectral_centroid_mean
- * @property {number} anomalyFeatures.spectral_flatness_mean
- * @property {number} anomalyFeatures.spectral_centroid_std
- * @property {number} anomalyFeatures.spectral_rolloff_std
- * @property {number} meanRms - Level channel (RMS amplitude, not in anomaly score)
+ * @property {string} version - e.g. 'prism-inference-v2.0'
+ * @property {Float64Array} features - The 4 V2 features, in V2 order
+ * @property {number} mean_rms - Level channel (RMS amplitude, not in anomaly score)
  */
 
 // ─── Anomaly Scoring ─────────────────────────────────────────────────────────
@@ -141,68 +143,53 @@
  * @property {number} spectral_rolloff_std
  */
 
-/**
- * Anomaly result for a single event.
- *
- * @typedef {Object} EventAnomalyResult
- * @property {string} status - 'SCORE_ONLY' | 'NOT_SCOREABLE'
- * @property {string[]} notScoreableReasons - Empty if SCORE_ONLY
- * @property {number|null} anomalyScore - sqrt(mean(z²)), null if NOT_SCOREABLE
- * @property {Object|null} featureValues - Raw feature values, null if NOT_SCOREABLE
- * @property {FeatureZScores|null} featureZScores - Per-feature z-scores, null if NOT_SCOREABLE
- * @property {number|null} meanRms - Level channel value
- */
-
-// ─── Recording-Level Result ──────────────────────────────────────────────────
+// ─── Canonical output (inference_output.schema.json) ────────────────────────
 
 /**
- * The complete result of processing one recording/session through the pipeline.
- * Matches the structure in inference_output.schema.json.
+ * The only result schema: InferencePipeline.run() returns this object, validated by
+ * contract.validateOutput. Keys and key order are those of prism_inference.OUTPUT_KEYS.
+ * Plain JSON only (no typed arrays, no undefined, no NaN).
  *
- * @typedef {Object} RecordingResult
- * @property {string} contractVersion - e.g. 'prism-inference-v2.0'
- * @property {string} baselineId - e.g. 'prism-v2-global-2026-09-30'
- * @property {string} recordingStatus - 'EVENTS_DETECTED' | 'NO_INHALATION_DETECTED' | 'INPUT_ERROR'
- * @property {string|null} error - Error description if INPUT_ERROR, null otherwise
- * @property {RecordingInput} input - Input metadata
- * @property {boolean} baselineDomainValidated - true only for reference_dataset inputs
- * @property {string[]} featureOrder - V2 feature names in order
- * @property {number} nEvents - Total detected events
- * @property {number} nScored - Events with SCORE_ONLY status
- * @property {EventResult[]} events - Per-event results
- * @property {string} interpretation - Human-readable interpretation caveat
- * @property {VersionMetadata} versions - Pipeline version metadata
+ * @typedef {Object} RecordingOutput
+ * @property {'prism-inference-v2.0'} contract_version
+ * @property {string} baseline_id
+ * @property {string} detector_model_sha256 - verified SHA-256 of the loaded model bytes
+ * @property {'EVENTS_DETECTED'|'NO_INHALATION_DETECTED'|'INPUT_ERROR'} recording_status
+ * @property {string|null} error - an INPUT_ERROR code (versions.INPUT_ERRORS), else null
+ * @property {RecordingInputMeta} input
+ * @property {boolean} baseline_domain_validated - true only for input_domain 'reference_dataset'
+ * @property {string[]} feature_order - the V2 order
+ * @property {number} n_events
+ * @property {number} n_scored
+ * @property {EventOutput[]} events - chronological
+ * @property {string} interpretation - the contract's SCORE_ONLY text
  */
 
 /**
- * Input metadata recorded in the result.
- *
- * @typedef {Object} RecordingInput
- * @property {number} sampleRate - Hz
- * @property {number} nSamples - Total samples
- * @property {number} durationS - Duration in seconds
- * @property {string} inputDomain - 'reference_dataset' | 'prism_hardware' | 'unknown'
- * @property {string|null} recordingId - Source identifier
- * @property {Date|null} recordedAt - Timestamp
+ * @typedef {Object} RecordingInputMeta
+ * @property {number} sample_rate
+ * @property {number} n_samples
+ * @property {number|null} duration_s
+ * @property {'reference_dataset'|'prism_hardware'|'unknown'} input_domain
+ * @property {string|null} recording_id
+ * @property {string|null} recorded_at - caller-supplied ISO 8601 start time
  */
 
 /**
- * A single event's complete result in the recording output.
- *
- * @typedef {Object} EventResult
- * @property {number} eventId
- * @property {number} startTime
- * @property {number} endTime
- * @property {number} durationS
- * @property {number} detectorConfidence
- * @property {number} detectorMaxConfidence
- * @property {number} windowCount
- * @property {string} status - 'SCORE_ONLY' | 'NOT_SCOREABLE'
- * @property {string[]} notScoreableReasons
- * @property {number|null} anomalyScore
- * @property {Object|null} featureValues
- * @property {FeatureZScores|null} featureZScores
- * @property {number|null} meanRms
+ * @typedef {Object} EventOutput
+ * @property {number} event_id
+ * @property {number} start_time - seconds from recording start
+ * @property {number} end_time
+ * @property {number} duration_s
+ * @property {number} detector_confidence - mean P(Inhale) over the event's Inhale windows
+ * @property {number} detector_max_confidence
+ * @property {number} window_count
+ * @property {'SCORE_ONLY'|'NOT_SCOREABLE'} status
+ * @property {string[]} not_scoreable_reasons
+ * @property {number|null} anomaly_score - SCORE_ONLY only; a distance, no threshold
+ * @property {FeatureZScores|null} feature_values - finite V2 values, also for NOT_SCOREABLE events
+ * @property {FeatureZScores|null} feature_z_scores - SCORE_ONLY only
+ * @property {number|null} mean_rms - diagnostic level channel
  */
 
 // ─── Version Metadata ────────────────────────────────────────────────────────

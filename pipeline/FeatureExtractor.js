@@ -1,27 +1,24 @@
-import fs from 'fs';
 import FFT from 'fft.js';
 import { PIPELINE_CONFIG } from './versions.js';
 import { DSP_CONSTANTS } from './dsp_constants.js';
+import { featureSchemaV2 } from './contractAssets.js';
 
 /**
  * Stage 10: Versioned Event-Feature Engine
  * Extracts anomaly features and mean_rms from isolated event PCM segments.
  */
 export class FeatureExtractor {
-    constructor(schemaPath = 'assets/ml/v2_validation/v2_feature_schema.json') {
-        let schemaContent = '{}';
-        // In React Native, you would import the schema directly or pass it in.
-        // For node environments:
-        if (typeof process !== 'undefined' && fs.readFileSync) {
-            schemaContent = fs.readFileSync(schemaPath, 'utf8');
-        } else {
-            // Fallback for non-node environments - this should ideally be injected
-            throw new Error("Cannot load schema directly in this environment. Pass schema content in constructor.");
-        }
-        
-        this.schema = JSON.parse(schemaContent);
+    /**
+     * @param {Object} [schema] - parsed v2_feature_schema.json (default: the bundled copy).
+     *   Loaded statically (contractAssets.js), not through fs, so this works in React Native.
+     */
+    constructor(schema = featureSchemaV2) {
+        this.schema = schema;
         this.n_fft = this.schema.frames.n_fft; // 256
         this.hop = this.schema.frames.hop_length; // 64
+        if (this.n_fft !== PIPELINE_CONFIG.nFft || this.hop !== PIPELINE_CONFIG.hopLength) {
+            throw new Error(`feature schema frames (n_fft ${this.n_fft}, hop ${this.hop}) do not match the pipeline configuration`);
+        }
         
         this.fft = new FFT(this.n_fft);
         this.hann_window = DSP_CONSTANTS.hann_window;

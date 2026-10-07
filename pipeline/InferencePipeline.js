@@ -1,91 +1,135 @@
 /**
  * pipeline/InferencePipeline.js
  *
- * Orchestrates the full PRISM inference pipeline:
- *   PCM → DSP → Windows → ONNX → Events → Features → Score → Result
+ * The PRISM V2 inference contract (prism-inference-v2.0) on the device:
+ *   PCM → DSP (124-dim frames) → CNN windows → ONNX detector → Inhale events
+ *       → scoreability (usability rule v1) → V2 features + mean_rms
+ *       → frozen global baseline → robust z → anomaly_score (SCORE_ONLY)
  *
- * Each stage is a separate method so it can be implemented, tested,
- * and validated independently (Stages 2–12 of the plan).
+ * The reference implementation is `prism_inference.analyze_recording` in the research
+ * repository (with `post_event.generate_window_predictions` / `group_inhale_events`).
+ * run() returns exactly the canonical output object of inference_output.schema.json,
+ * validated by contract.validateOutput. There is no other result schema.
  *
- * Currently all processing methods are stubs that define the interface.
- * They will be filled in by subsequent stages.
- *
- * The pipeline does NOT depend on React, Firebase, or BLE.
- * It accepts PcmData and returns a RecordingResult.
+ * The pipeline does not depend on React, Firebase, BLE or Node. Platform specifics are
+ * injected: the ONNX detector (pipeline/runtime/node.js or pipeline/runtime/reactNative.js)
+ * and, optionally, the baseline JSON (default: the bundled v2_baseline.json).
  */
 
-import PcmSource from "./PcmSource.js";
+import BaselineStore from "./BaselineStore.js";
+import { DspEngine } from "./dsp.js";
+import { FeatureExtractor } from "./FeatureExtractor.js";
+import {
+  checkInput,
+  checkInputDomain,
+  roundHalfEven,
+  rmsZ,
+  toIsoOrNull,
+  validateOutput,
+} from "./contract.js";
 import {
   PIPELINE_CONFIG,
-  CURRENT_VERSIONS,
+  SCOREABILITY_CONFIG,
   RECORDING_STATUS,
   EVENT_STATUS,
+  NOT_SCOREABLE_REASONS,
   V2_FEATURE_ORDER,
+  INFERENCE_CONTRACT_VERSION,
   SCORE_INTERPRETATION,
-  ERROR_CODES,
+  TIME_DECIMALS,
 } from "./versions.js";
 
+const INHALE_CLASS = PIPELINE_CONFIG.classLabels.indexOf("Inhale"); // 2
+
 export default class InferencePipeline {
-  constructor() {
-    /** @type {boolean} */
-    this._modelLoaded = false;
-    /** @type {Object|null} */
+  /**
+   * @param {Object} [options]
+   * @param {import('./OnnxDetector').default} [options.detector] - verified ONNX detector.
+   *   Required by run()/runInference(); create it with createNodeDetector() (Node) or
+   *   createReactNativeDetector() (app).
+   * @param {Object} [options.baseline] - parsed baseline JSON (default: bundled v2_baseline.json)
+   */
+  constructor(options = {}) {
+    this._detector = options.detector ?? null;
+    this._baselineJson = options.baseline ?? undefined;
     this._baseline = null;
+    this._dspEngine = null;
+    this._featureExtractor = null;
   }
 
   // ─── Main Entry Point ──────────────────────────────────────────────────────
 
   /**
-   * Run the full inference pipeline on PCM audio from any source.
+   * Apply the inference contract to one recording.
    *
-   * @param {import('./PcmSource').default} source - A PcmSource subclass instance
-   * @returns {Promise<import('./types').RecordingResult>}
+   * Contract states are returned, never thrown: INPUT_ERROR (with its error code),
+   * NO_INHALATION_DETECTED and EVENTS_DETECTED. Exceptions mean the pipeline itself could not
+   * run (no detector, model verification failed, invalid baseline, unreadable source).
+   *
+   * @param {import('./PcmSource').default} source - a PcmSource subclass instance
+   * @returns {Promise<Object>} the canonical output (inference_output.schema.json)
    */
   async run(source) {
-    // 1. Acquire PCM from source
+    if (typeof source?.acquire !== "function") {
+      throw new TypeError("run() expects a PcmSource (an object with acquire())");
+    }
+    const detector = this._requireDetector();
+    const baseline = await this._getBaseline();
     const pcmData = await source.acquire();
+    const inputDomain = checkInputDomain(pcmData?.inputDomain);
+    const { error, samples, nSamples } = checkInput(pcmData);
 
-    // 2. Validate input
-    const validation = PcmSource.validate(pcmData);
-    if (!validation.valid) {
-      return this._inputErrorResult(pcmData, validation.errors.join("; "));
+    const sampleRate = pcmData.sampleRate;
+    if (!Number.isInteger(sampleRate)) throw new TypeError("PcmData.sampleRate must be an integer");
+    const output = {
+      contract_version: INFERENCE_CONTRACT_VERSION,
+      baseline_id: baseline.baselineId,
+      detector_model_sha256: detector.modelSha256,
+      recording_status: RECORDING_STATUS.INPUT_ERROR,
+      error,
+      input: {
+        sample_rate: sampleRate,
+        n_samples: nSamples,
+        duration_s: sampleRate > 0 ? nSamples / sampleRate : null,
+        input_domain: inputDomain,
+        recording_id: pcmData.sourceId ?? null,
+        recorded_at: toIsoOrNull(pcmData.recordedAt),
+      },
+      baseline_domain_validated: inputDomain === "reference_dataset",
+      feature_order: [...V2_FEATURE_ORDER],
+      n_events: 0,
+      n_scored: 0,
+      events: [],
+      interpretation: SCORE_INTERPRETATION,
+    };
+
+    if (error === null) {
+      const pcm = { ...pcmData, samples };
+      const frameFeatures = await this.extractFrameFeatures(pcm);
+      if (!this._allFinite(frameFeatures)) {
+        // The detector's 124-feature frames were not finite (post_event raises ValueError).
+        output.error = "detector_feature_extraction_failed";
+      } else {
+        const windows = this.buildWindows(frameFeatures, samples.length / sampleRate);
+        const predictions = await this.runInference(windows);
+        const events = this.decodeEvents(predictions, pcm);
+        output.events = [];
+        for (const event of events) {
+          output.events.push(await this.processEvent(event, events, pcm));
+        }
+        output.recording_status = events.length > 0
+          ? RECORDING_STATUS.EVENTS_DETECTED
+          : RECORDING_STATUS.NO_INHALATION_DETECTED;
+        output.n_events = output.events.length;
+        output.n_scored = output.events.filter((e) => e.status === EVENT_STATUS.SCORE_ONLY).length;
+      }
     }
 
-    // 3. Extract frame features (124-dim per frame)
-    const frameFeatures = await this.extractFrameFeatures(pcmData);
-
-    // 4. Build CNN sliding windows ([N, 25, 124])
-    const windows = this.buildWindows(frameFeatures);
-
-    if (windows.length === 0) {
-      return this._inputErrorResult(
-        pcmData,
-        ERROR_CODES.SHORTER_THAN_ONE_WINDOW
-      );
-    }
-
-    // 5. Run ONNX inference
-    const predictions = await this.runInference(windows);
-
-    // 6. Decode temporal events (group Inhale predictions)
-    const events = this.decodeEvents(predictions, pcmData);
-
-    if (events.length === 0) {
-      return this._noInhalationResult(pcmData);
-    }
-
-    // 7. For each event: extract features, check scoreability, score
-    const eventResults = [];
-    for (const event of events) {
-      const eventResult = await this.processEvent(event, events, pcmData);
-      eventResults.push(eventResult);
-    }
-
-    // 8. Build recording-level result
-    return this._eventsDetectedResult(pcmData, eventResults);
+    validateOutput(output);
+    return output;
   }
 
-  // ─── Pipeline Stage Methods (stubs) ────────────────────────────────────────
+  // ─── Pipeline Stage Methods ────────────────────────────────────────────────
 
   /**
    * Stage 3: Extract 124-dim frame features from PCM.
@@ -94,529 +138,311 @@ export default class InferencePipeline {
    * @returns {Promise<import('./types').FrameFeatures[]>}
    */
   async extractFrameFeatures(pcmData) {
-    if (!this._dspEngine) {
-      // Lazy load to avoid importing DSP constants if not needed
-      const { DspEngine } = await import('./dsp.js');
-      this._dspEngine = new DspEngine();
-    }
+    if (!this._dspEngine) this._dspEngine = new DspEngine();
     return this._dspEngine.processPcm(pcmData.samples);
   }
 
   /**
    * Stage 5: Build [25, 124] sliding windows from frame features.
    *
+   * Window times follow post_event.generate_window_predictions exactly:
+   *   start = i * (2 * 64 / 8000),  end = min(start + 25 * 64 / 8000, recording duration).
+   * The event segment is sliced as [floor(start * 8000), ceil(end * 8000)), so the times must
+   * be the same floating-point values as the reference's, not merely close to them (F14).
+   *
    * @param {import('./types').FrameFeatures[]} frameFeatures
+   * @param {number} [recordingDurationS] - len(waveform) / sample_rate; caps the last windows' end.
+   *   run() always passes it. Without it the end is not capped (previous behaviour).
    * @returns {import('./types').CnnWindow[]}
    */
-  buildWindows(frameFeatures) {
+  buildWindows(frameFeatures, recordingDurationS) {
     const windows = [];
     const windowSize = PIPELINE_CONFIG.windowSize; // 25
     const stride = PIPELINE_CONFIG.windowStride; // 2
-    
-    if (frameFeatures.length < windowSize) {
-      return windows;
-    }
-    
+    const numFeats = PIPELINE_CONFIG.featureDim; // 124
+    if (frameFeatures.length < windowSize) return windows;
+
+    const hop = PIPELINE_CONFIG.hopLength;
+    const sr = PIPELINE_CONFIG.sampleRate;
+    const windowDuration = windowSize * hop / sr; // evaluated as (25 * 64) / 8000, as in Python
+    const strideDuration = stride * hop / sr; // (2 * 64) / 8000
+    const duration = recordingDurationS ?? Infinity;
+
     const numWindows = Math.floor((frameFeatures.length - windowSize) / stride) + 1;
-    const numFeats = 124; // Constant 124-dim features
-    
     for (let w = 0; w < numWindows; w++) {
       const startIndex = w * stride;
-      const endIndex = startIndex + windowSize;
-      
       const tensor = new Float32Array(windowSize * numFeats);
-      let ptr = 0;
-      
-      for (let f = startIndex; f < endIndex; f++) {
-        tensor.set(frameFeatures[f].features, ptr);
-        ptr += numFeats;
+      for (let f = 0; f < windowSize; f++) {
+        tensor.set(frameFeatures[startIndex + f].features, f * numFeats);
       }
-      
+      const startTime = w * strideDuration;
       windows.push({
         windowIndex: w,
-        tensor: tensor,
-        startTime: frameFeatures[startIndex].timestamp,
-        // The endTime of the window is the timestamp of the last frame in the window,
-        // plus the hop size (which represents the physical time covered by that last frame's stride).
-        // For simplicity we just use the timestamp of the last frame + hop duration.
-        // Assuming 8000Hz and hop=64, hop duration = 0.008s.
-        endTime: frameFeatures[endIndex - 1].timestamp + (64.0 / 8000.0)
+        tensor,
+        startTime,
+        endTime: Math.min(startTime + windowDuration, duration),
       });
     }
-    
     return windows;
   }
 
   /**
-   * Stage 2/6: Run ONNX model inference on windows.
+   * Stage 2/6: Run the ONNX detector on every window.
+   *
+   * Softmax as post_event.OnnxEventClassifier.predict_probabilities: float32 logits are
+   * converted to float64, shifted by their max, exponentiated and normalised, and the
+   * probabilities are rounded to float32. Label = first argmax.
    *
    * @param {import('./types').CnnWindow[]} windows
    * @returns {Promise<import('./types').WindowPrediction[]>}
    */
   async runInference(windows) {
     if (windows.length === 0) return [];
-
-    // Dynamically load ONNX runtime to avoid breaking Node.js test scripts
-    // that don't have React Native environment. In a real RN app, this uses
-    // onnxruntime-react-native. In Node, it falls back to onnxruntime-node.
-    let ort;
-    try {
-      if (typeof navigator !== 'undefined' && navigator.product === 'ReactNative') {
-        ort = require('onnxruntime-react-native');
-      } else {
-        ort = await import('onnxruntime-node');
-        // Handle commonjs module default export if needed
-        if (ort.default) ort = ort.default;
-      }
-    } catch (e) {
-      throw new Error(`Failed to load ONNX runtime: ${e.message}`);
-    }
-
-    if (!this._baseline) {
-      // Load model if not loaded (caching the session in a real implementation)
-      // Note: In RN, the model path comes from require(), in Node from a string path.
-      const modelPath = typeof navigator !== 'undefined' && navigator.product === 'ReactNative' 
-        ? require('../assets/ml/inhaler_cnn.onnx') 
-        : './assets/ml/inhaler_cnn.onnx';
-        
-      this._baseline = await ort.InferenceSession.create(modelPath);
-    }
-    
-    const session = this._baseline;
-    const inputName = session.inputNames[0]; // 'features'
-    const outputName = session.outputNames[0]; // 'logits'
-
+    const detector = this._requireDetector();
     const predictions = [];
-
-    // Process each window
     for (const window of windows) {
-      // Shape: [1, 25, 124]
-      const tensor = new ort.Tensor('float32', window.tensor, [1, 25, 124]);
-      const feeds = {};
-      feeds[inputName] = tensor;
-
-      const results = await session.run(feeds);
-      const logits = results[outputName].data; // Float32Array(4)
-
-      // Softmax
+      const logits = await detector.logits(window.tensor);
       let maxLogit = -Infinity;
-      for (let i = 0; i < logits.length; i++) {
-        if (logits[i] > maxLogit) maxLogit = logits[i];
+      for (let i = 0; i < logits.length; i++) if (logits[i] > maxLogit) maxLogit = logits[i];
+      const exps = Array.from(logits, (v) => Math.exp(v - maxLogit));
+      const sumExp = exps.reduce((a, b) => a + b, 0);
+      const probabilities = Float32Array.from(exps, (e) => e / sumExp);
+      let predictedClass = 0;
+      for (let i = 1; i < probabilities.length; i++) {
+        if (probabilities[i] > probabilities[predictedClass]) predictedClass = i;
       }
-      
-      let sumExp = 0;
-      const probs = new Float32Array(logits.length);
-      for (let i = 0; i < logits.length; i++) {
-        probs[i] = Math.exp(logits[i] - maxLogit);
-        sumExp += probs[i];
-      }
-      
-      let predictedClass = -1;
-      let maxProb = -1;
-      for (let i = 0; i < logits.length; i++) {
-        probs[i] /= sumExp;
-        if (probs[i] > maxProb) {
-          maxProb = probs[i];
-          predictedClass = i;
-        }
-      }
-
       predictions.push({
         windowIndex: window.windowIndex,
-        logits: new Float32Array(logits),
-        probabilities: probs,
-        predictedClass: predictedClass,
+        logits,
+        probabilities,
+        predictedClass,
         predictedLabel: PIPELINE_CONFIG.classLabels[predictedClass],
         startTime: window.startTime,
         endTime: window.endTime,
       });
     }
-
     return predictions;
   }
 
   /**
-   * Stage 8: Decode window predictions into inhalation event intervals.
+   * Stage 8: Group Inhale windows into events (post_event.group_inhale_events with the
+   * contract's grouping config: no smoothing, max_gap_s 0, no minimum duration/confidence).
+   * A window joins the current event while start - (latest end of the event's windows) <= 0.
    *
-   * @param {import('./types').WindowPrediction[]} predictions
-   * @param {import('./types').PcmData} pcmData
+   * @param {import('./types').WindowPrediction[]} predictions - chronological
+   * @param {import('./types').PcmData} [pcmData] - unused; kept for the previous signature
    * @returns {import('./types').DecodedEvent[]}
    */
+  // eslint-disable-next-line no-unused-vars
   decodeEvents(predictions, pcmData) {
-    if (predictions.length === 0) return [];
-    
-    // 1. Filter to Inhale predictions (Class index 2)
-    const inhaleWins = predictions.filter(p => p.predictedClass === 2);
+    const inhaleWins = predictions.filter((p) => p.predictedClass === INHALE_CLASS);
     if (inhaleWins.length === 0) return [];
-    
-    // Sort chronologically (should already be sorted, but to be safe)
-    inhaleWins.sort((a, b) => a.startTime - b.startTime);
-    
+
     const events = [];
-    let currentEvent = null;
-    let eventId = 0;
-    
-    for (const win of inhaleWins) {
-      if (!currentEvent) {
-        currentEvent = { windows: [win], end: win.endTime };
+    let current = [inhaleWins[0]];
+    let currentEnd = inhaleWins[0].endTime;
+    for (const win of inhaleWins.slice(1)) {
+      if (win.startTime - currentEnd <= 0.0) {
+        current.push(win);
+        currentEnd = Math.max(currentEnd, win.endTime);
       } else {
-        // A window joins if its start <= the latest end of the event's windows
-        if (win.startTime <= currentEvent.end + 1e-6) {
-          currentEvent.windows.push(win);
-          currentEvent.end = Math.max(currentEvent.end, win.endTime);
-        } else {
-          // Finish current event
-          events.push(this._finalizeEvent(currentEvent, eventId++, pcmData));
-          
-          // Start new event
-          currentEvent = { windows: [win], end: win.endTime };
-        }
+        events.push(this._finalizeEvent(current, events.length));
+        current = [win];
+        currentEnd = win.endTime;
       }
     }
-    
-    if (currentEvent) {
-      events.push(this._finalizeEvent(currentEvent, eventId++, pcmData));
-    }
-    
+    events.push(this._finalizeEvent(current, events.length));
     return events;
   }
-  
+
   /**
-   * Helper to build the final event structure from grouped windows
+   * Build one decoded event from its grouped Inhale windows (InhaleEvent in post_event):
+   * start = min window start, end = max window end, confidence = mean / max P(Inhale).
    * @private
    */
-  _finalizeEvent(eventGroup, eventId, pcmData) {
-    const wins = eventGroup.windows;
-    const start = wins[0].startTime;
-    let end = start;
+  _finalizeEvent(wins, eventId) {
+    let start = Infinity;
+    let end = -Infinity;
     let sumProb = 0;
-    let maxProb = 0;
-    
+    let maxProb = -Infinity;
     for (const win of wins) {
+      start = Math.min(start, win.startTime);
       end = Math.max(end, win.endTime);
-      const prob = win.probabilities[2]; // P(Inhale)
+      const prob = win.probabilities[INHALE_CLASS];
       sumProb += prob;
       if (prob > maxProb) maxProb = prob;
     }
-    
-    const duration = end - start;
-    const meanProb = sumProb / wins.length;
-    
     return {
-      eventId: eventId,
+      eventId,
       startS: start,
       endS: end,
-      durationS: duration,
-      detectorConfidence: meanProb,
+      durationS: end - start,
+      detectorConfidence: sumProb / wins.length,
       detectorMaxConfidence: maxProb,
+      windowCount: wins.length,
+      windowIndices: wins.map((w) => w.windowIndex),
       windowPredictions: wins,
-      // Metadata/Results populated in later stages
-      scoreable: false,
-      notScoreableReasons: [],
-      eventFeatures: null,
-      score: null
     };
   }
 
   /**
-   * Stages 9-12: Process a single decoded event through feature extraction,
-   * scoreability check, and anomaly scoring.
+   * Stages 9-12: measure one event, apply the usability rule and score it.
    *
    * @param {import('./types').DecodedEvent} event
-   * @param {import('./types').DecodedEvent[]} allEvents
+   * @param {import('./types').DecodedEvent[]} allEvents - chronological, as decoded
    * @param {import('./types').PcmData} pcmData
-   * @returns {Promise<import('./types').EventResult>}
+   * @returns {Promise<Object>} the canonical event object (EVENT_KEYS order)
    */
   async processEvent(event, allEvents, pcmData) {
-    // 9. Extract event PCM segment
     const eventPcm = this.extractEventPcm(event, pcmData);
-
-    // 10. Extract event-level features (V2)
-    const features = await this.extractEventFeatures(eventPcm);
-
-    // 7. Check scoreability (Stage 1 usability rule)
+    // An event that does not overlap the audio cannot be measured (analyze_inhalation raises).
+    const features = eventPcm.length > 0 ? await this.extractEventFeatures(eventPcm) : null;
     const scoreability = this.checkScoreability(event, allEvents, pcmData, features);
-
-    if (!scoreability.isScoreable) {
-      return this._notScoreableEventResult(event, scoreability, features);
-    }
-
-    // 12. Score against baseline
-    const scoring = await this.scoreEvent(features);
-
-    return this._scoredEventResult(event, features, scoring);
+    const scoring = scoreability.isScoreable ? await this.scoreEvent(features) : null;
+    return this._eventOutput(event, features, scoreability.reasons, scoring);
   }
 
   /**
-   * Stage 9: Extract the raw PCM segment for one event.
+   * Stage 9: the event's raw PCM segment, waveform[floor(start * sr) : ceil(end * sr)].
    *
    * @param {import('./types').DecodedEvent} event
    * @param {import('./types').PcmData} pcmData
-   * @returns {Float32Array} Event PCM samples
+   * @returns {Float32Array} a view on the event samples
    */
   extractEventPcm(event, pcmData) {
     const sr = pcmData.sampleRate;
-    
-    // Calculate sample indices
-    let startIdx = Math.floor(event.startS * sr);
-    let endIdx = Math.ceil(event.endS * sr);
-    
-    // Clamp to valid range
-    startIdx = Math.max(0, startIdx);
-    endIdx = Math.min(pcmData.samples.length, endIdx);
-    
-    // Ensure valid slice
-    if (startIdx >= endIdx) {
-      return new Float32Array(0);
-    }
-    
-    // Return a copy or view? subarray creates a view (no allocation overhead).
-    // Using slice() creates a copy, but subarray() is more efficient and safe
-    // as long as we only read it in subsequent stages.
+    const startIdx = Math.max(0, Math.floor(event.startS * sr));
+    const endIdx = Math.min(pcmData.samples.length, Math.ceil(event.endS * sr));
+    if (startIdx >= endIdx) return new Float32Array(0);
     return pcmData.samples.subarray(startIdx, endIdx);
   }
 
   /**
-   * Stage 10: Extract V2 event-level features from event PCM.
+   * Stage 10: V2 event features and mean_rms of an event segment.
    *
    * @param {Float32Array} eventPcm
    * @returns {Promise<import('./types').EventFeatures>}
    */
   async extractEventFeatures(eventPcm) {
-    if (!this._featureExtractor) {
-      const { FeatureExtractor } = await import('./FeatureExtractor.js');
-      this._featureExtractor = new FeatureExtractor();
-    }
+    if (!this._featureExtractor) this._featureExtractor = new FeatureExtractor();
     return this._featureExtractor.extractFeatures(eventPcm);
   }
 
   /**
-   * Stage 7 (scoreability): Check if an event passes the usability rule.
+   * Stage 7 (scoreability): Stage 1 usability rule v1, as prism_inference.not_scoreable_reasons.
+   * Reasons are listed in the contract's order. Durations and neighbour gaps are rounded to
+   * 6 decimals (numpy.round, ties to even) before comparison; boundary times are not rounded.
    *
    * @param {import('./types').DecodedEvent} event
-   * @param {import('./types').DecodedEvent[]} allEvents
+   * @param {import('./types').DecodedEvent[]} allEvents - chronological
    * @param {import('./types').PcmData} pcmData
-   * @param {import('./types').EventFeatures} features
+   * @param {import('./types').EventFeatures|null} features - null if measurement failed
    * @returns {import('./types').EventScoreability}
    */
   checkScoreability(event, allEvents, pcmData, features) {
-    const reasons = [];
-    
-    // 1. nonfinite_feature
-    let hasNonFinite = !isFinite(features.mean_rms);
-    for (let i = 0; i < features.features.length; i++) {
-        if (!isFinite(features.features[i])) hasNonFinite = true;
-    }
-    if (hasNonFinite) reasons.push("nonfinite_feature");
-    
-    // 2. short_duration (round to 6 decimals)
-    const durationS = Math.round(event.durationS * 1e6) / 1e6;
-    if (durationS < 0.5) reasons.push("short_duration");
-    
-    // 3. close_neighbor
-    let closeNeighbor = false;
-    for (const other of allEvents) {
-        if (other.eventId === event.eventId) continue;
-        // Check if other is after this
-        if (other.startS >= event.endS) {
-            const gap = Math.round((other.startS - event.endS) * 1e6) / 1e6;
-            if (gap < 0.2) closeNeighbor = true;
-        }
-        // Check if other is before this
-        if (event.startS >= other.endS) {
-            const gap = Math.round((event.startS - other.endS) * 1e6) / 1e6;
-            if (gap < 0.2) closeNeighbor = true;
-        }
-    }
-    if (closeNeighbor) reasons.push("close_neighbor");
-    
-    // 4. recording_boundary
-    const recDuration = pcmData.samples.length / pcmData.sampleRate;
-    if (event.startS <= 0.008 || event.endS >= recDuration - 0.008) {
-        reasons.push("recording_boundary");
-    }
-    
-    return {
-        isScoreable: reasons.length === 0,
-        reasons: reasons
+    const finite = features != null
+      && Array.from(features.features).every(Number.isFinite)
+      && Number.isFinite(features.mean_rms);
+
+    const i = allEvents.indexOf(event) >= 0
+      ? allEvents.indexOf(event)
+      : allEvents.findIndex((e) => e.eventId === event.eventId);
+    const gaps = [];
+    if (i > 0) gaps.push(roundHalfEven(event.startS - allEvents[i - 1].endS, TIME_DECIMALS));
+    if (i >= 0 && i + 1 < allEvents.length) gaps.push(roundHalfEven(allEvents[i + 1].startS - event.endS, TIME_DECIMALS));
+
+    const recordingDuration = pcmData.samples.length / pcmData.sampleRate;
+    const margin = SCOREABILITY_CONFIG.boundaryMarginS;
+    const flags = {
+      [NOT_SCOREABLE_REASONS.NONFINITE_FEATURE]: !finite,
+      [NOT_SCOREABLE_REASONS.SHORT_DURATION]:
+        roundHalfEven(event.durationS, TIME_DECIMALS) < SCOREABILITY_CONFIG.minDurationS,
+      [NOT_SCOREABLE_REASONS.CLOSE_NEIGHBOR]: gaps.length > 0 && Math.min(...gaps) < SCOREABILITY_CONFIG.minGapS,
+      [NOT_SCOREABLE_REASONS.RECORDING_BOUNDARY]:
+        event.startS <= margin || event.endS >= recordingDuration - margin,
     };
+    const reasons = Object.values(NOT_SCOREABLE_REASONS).filter((r) => flags[r]);
+    return { isScoreable: reasons.length === 0, reasons };
   }
 
   /**
-   * Stage 12: Compute anomaly score against the baseline.
+   * Stage 12: robust z against the frozen baseline (float64) and anomaly_score = sqrt(mean z²).
    *
    * @param {import('./types').EventFeatures} features
-   * @returns {Promise<{ anomalyScore: number, featureZScores: import('./types').FeatureZScores }>}
+   * @returns {Promise<{ anomalyScore: number, featureZScores: Float64Array }>} in V2 order
    */
   async scoreEvent(features) {
-    if (!this._baselineStore) {
-        const { default: BaselineStore } = await import('./BaselineStore.js');
-        this._baselineStore = new BaselineStore();
-        await this._baselineStore.loadBaseline();
+    const baseline = await this._getBaseline();
+    if (features.version !== undefined && features.version !== baseline.featureSchemaVersion) {
+      throw new Error(`features were computed for ${features.version}, baseline is ${baseline.featureSchemaVersion}`);
     }
-    const baseline = this._baselineStore.getBaseline(features.version);
-    
-    // Calculate z-scores
-    const zScores = new Float64Array(features.features.length);
-    let sumZ2 = 0;
-    
-    for (let i = 0; i < features.features.length; i++) {
-        const val = features.features[i];
-        const center = baseline.centers[i];
-        const scale = baseline.scales[i];
-        
-        const z = (val - center) / scale;
-        zScores[i] = z;
-        sumZ2 += z * z;
+    const zScores = new Float64Array(V2_FEATURE_ORDER.length);
+    for (let i = 0; i < zScores.length; i++) {
+      zScores[i] = (features.features[i] - baseline.centers[i]) / baseline.scales[i];
     }
-    
-    const anomalyScore = Math.sqrt(sumZ2 / features.features.length);
-    
-    return {
-        anomalyScore,
-        featureZScores: zScores
-    };
+    return { anomalyScore: rmsZ(zScores), featureZScores: zScores };
   }
 
-  // ─── Result Builders ───────────────────────────────────────────────────────
+  // ─── Canonical event object ────────────────────────────────────────────────
 
   /**
-   * Build an INPUT_ERROR recording result.
-   * @param {import('./types').PcmData} pcmData
-   * @param {string} errorMsg
-   * @returns {import('./types').RecordingResult}
+   * prism_inference._event_output: plain JSON numbers, named objects in V2 order.
+   * feature_values are reported whenever all four are finite (also for NOT_SCOREABLE events);
+   * z-scores and anomaly_score only for SCORE_ONLY events.
+   * @private
    */
-  _inputErrorResult(pcmData, errorMsg) {
+  _eventOutput(event, features, reasons, scoring) {
+    const values = features ? Array.from(features.features) : null;
+    const valuesFinite = values !== null && values.every(Number.isFinite);
+    const meanRms = features && Number.isFinite(features.mean_rms) ? features.mean_rms : null;
+    const named = (arr) => Object.fromEntries(V2_FEATURE_ORDER.map((f, i) => [f, arr[i]]));
+    const scored = reasons.length === 0;
     return {
-      contractVersion: CURRENT_VERSIONS.inferenceContractVersion,
-      baselineId: CURRENT_VERSIONS.baselineVersion,
-      recordingStatus: RECORDING_STATUS.INPUT_ERROR,
-      error: errorMsg,
-      input: this._buildInputMeta(pcmData),
-      baselineDomainValidated: false,
-      featureOrder: [...V2_FEATURE_ORDER],
-      nEvents: 0,
-      nScored: 0,
-      events: [],
-      interpretation: SCORE_INTERPRETATION,
-      versions: { ...CURRENT_VERSIONS },
-    };
-  }
-
-  /**
-   * Build a NO_INHALATION_DETECTED recording result.
-   * @param {import('./types').PcmData} pcmData
-   * @returns {import('./types').RecordingResult}
-   */
-  _noInhalationResult(pcmData) {
-    return {
-      contractVersion: CURRENT_VERSIONS.inferenceContractVersion,
-      baselineId: CURRENT_VERSIONS.baselineVersion,
-      recordingStatus: RECORDING_STATUS.NO_INHALATION_DETECTED,
-      error: null,
-      input: this._buildInputMeta(pcmData),
-      baselineDomainValidated: false,
-      featureOrder: [...V2_FEATURE_ORDER],
-      nEvents: 0,
-      nScored: 0,
-      events: [],
-      interpretation: SCORE_INTERPRETATION,
-      versions: { ...CURRENT_VERSIONS },
-    };
-  }
-
-  /**
-   * Build an EVENTS_DETECTED recording result.
-   * @param {import('./types').PcmData} pcmData
-   * @param {import('./types').EventResult[]} eventResults
-   * @returns {import('./types').RecordingResult}
-   */
-  _eventsDetectedResult(pcmData, eventResults) {
-    const nScored = eventResults.filter(
-      (e) => e.status === EVENT_STATUS.SCORE_ONLY
-    ).length;
-
-    return {
-      contractVersion: CURRENT_VERSIONS.inferenceContractVersion,
-      baselineId: CURRENT_VERSIONS.baselineVersion,
-      recordingStatus: RECORDING_STATUS.EVENTS_DETECTED,
-      error: null,
-      input: this._buildInputMeta(pcmData),
-      baselineDomainValidated: false,
-      featureOrder: [...V2_FEATURE_ORDER],
-      nEvents: eventResults.length,
-      nScored,
-      events: eventResults,
-      interpretation: SCORE_INTERPRETATION,
-      versions: { ...CURRENT_VERSIONS },
-    };
-  }
-
-  /**
-   * Build a NOT_SCOREABLE event result.
-   * @param {import('./types').DecodedEvent} event
-   * @param {import('./types').EventScoreability} scoreability
-   * @param {import('./types').EventFeatures} features
-   * @returns {import('./types').EventResult}
-   */
-  _notScoreableEventResult(event, scoreability, features) {
-    return {
-      eventId: event.eventId,
-      startTime: event.startTime,
-      endTime: event.endTime,
-      durationS: event.durationS,
-      detectorConfidence: event.detectorConfidence,
-      detectorMaxConfidence: event.detectorMaxConfidence,
-      windowCount: event.windowCount,
-      status: EVENT_STATUS.NOT_SCOREABLE,
-      notScoreableReasons: scoreability.notScoreableReasons,
-      anomalyScore: null,
-      featureValues: null,
-      featureZScores: null,
-      meanRms: features?.meanRms ?? null,
-    };
-  }
-
-  /**
-   * Build a SCORE_ONLY event result.
-   * @param {import('./types').DecodedEvent} event
-   * @param {import('./types').EventFeatures} features
-   * @param {{ anomalyScore: number, featureZScores: import('./types').FeatureZScores }} scoring
-   * @returns {import('./types').EventResult}
-   */
-  _scoredEventResult(event, features, scoring) {
-    return {
-      eventId: event.eventId,
-      startTime: event.startTime,
-      endTime: event.endTime,
-      durationS: event.durationS,
-      detectorConfidence: event.detectorConfidence,
-      detectorMaxConfidence: event.detectorMaxConfidence,
-      windowCount: event.windowCount,
-      status: EVENT_STATUS.SCORE_ONLY,
-      notScoreableReasons: [],
-      anomalyScore: scoring.anomalyScore,
-      featureValues: features.anomalyFeatures,
-      featureZScores: scoring.featureZScores,
-      meanRms: features.meanRms,
+      event_id: event.eventId,
+      start_time: event.startS,
+      end_time: event.endS,
+      duration_s: event.durationS,
+      detector_confidence: event.detectorConfidence,
+      detector_max_confidence: event.detectorMaxConfidence,
+      window_count: event.windowCount,
+      status: scored ? EVENT_STATUS.SCORE_ONLY : EVENT_STATUS.NOT_SCOREABLE,
+      not_scoreable_reasons: [...reasons],
+      anomaly_score: scored ? scoring.anomalyScore : null,
+      feature_values: valuesFinite ? named(values) : null,
+      feature_z_scores: scored ? named(Array.from(scoring.featureZScores)) : null,
+      mean_rms: meanRms,
     };
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────────
 
-  /**
-   * Build input metadata for the recording result.
-   * @param {import('./types').PcmData} pcmData
-   * @returns {import('./types').RecordingInput}
-   */
-  _buildInputMeta(pcmData) {
-    return {
-      sampleRate: pcmData.sampleRate,
-      nSamples: pcmData.samples.length,
-      durationS: pcmData.samples.length / pcmData.sampleRate,
-      inputDomain: "unknown",
-      recordingId: pcmData.sourceId,
-      recordedAt: pcmData.recordedAt,
-    };
+  /** @private */
+  _requireDetector() {
+    if (!this._detector) {
+      throw new Error(
+        "InferencePipeline has no detector: create it with createNodePipeline() (pipeline/runtime/node.js) " +
+        "or createReactNativePipeline() (pipeline/runtime/reactNative.js)"
+      );
+    }
+    return this._detector;
+  }
+
+  /** @private */
+  async _getBaseline() {
+    if (!this._baseline) {
+      const store = new BaselineStore();
+      this._baseline = await store.loadBaseline(this._baselineJson);
+    }
+    return this._baseline;
+  }
+
+  /** @private */
+  _allFinite(frameFeatures) {
+    for (const frame of frameFeatures) {
+      for (let i = 0; i < frame.features.length; i++) {
+        if (!Number.isFinite(frame.features[i])) return false;
+      }
+    }
+    return true;
   }
 }

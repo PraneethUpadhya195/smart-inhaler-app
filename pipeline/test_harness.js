@@ -1,6 +1,6 @@
 import fs from 'fs';
 import WavPcmSource from './sources/WavPcmSource.js';
-import InferencePipeline from './InferencePipeline.js';
+import { createNodePipeline } from './runtime/node.js';
 import BaselineStore from './BaselineStore.js';
 import SessionAggregator from './SessionAggregator.js';
 
@@ -21,7 +21,7 @@ function assertClose(actual, expected, tol = 1e-4, message = "") {
 async function testHarness() {
     console.log("=== PRISM ML Regression Harness (Stage 15) ===\n");
     
-    const pipeline = new InferencePipeline();
+    const pipeline = await createNodePipeline(); // detector injected (onnxruntime-node)
     
     // 1. WAV Parsing & Frame Extraction
     console.log("1. Testing WavPcmSource and Frame Extraction...");

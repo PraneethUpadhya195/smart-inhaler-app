@@ -127,6 +127,45 @@ export const ERROR_CODES = Object.freeze({
   SHORTER_THAN_ONE_WINDOW: "shorter_than_one_detector_window",
 });
 
+// ─── Contract input/output vocabulary (prism_inference.py) ──────────────────
+
+/** INPUT_ERROR codes, in the order prism_inference.check_input tests them. */
+export const INPUT_ERRORS = Object.freeze([
+  "unsupported_sample_rate",
+  "invalid_shape",
+  "empty_audio",
+  "nonfinite_audio",
+  "amplitude_out_of_range",
+  "shorter_than_one_detector_window",
+  "detector_feature_extraction_failed",
+]);
+
+/** baseline_domain_validated is true only for "reference_dataset". Device audio is "prism_hardware". */
+export const INPUT_DOMAINS = Object.freeze(["reference_dataset", "prism_hardware", "unknown"]);
+
+/** Minimum input length: one full detector window, (25 - 1) * 64 samples. */
+export const MIN_SAMPLES = (PIPELINE_CONFIG.windowSize - 1) * PIPELINE_CONFIG.hopLength;
+
+/** Baseline scale = MAD_SCALE * MAD (contract baseline.loading). */
+export const MAD_SCALE = 1.4826;
+
+/** Rule-check times are rounded to 6 decimals, as in prism_inference (TIME_DECIMALS). */
+export const TIME_DECIMALS = 6;
+
+/** Exact key order of the canonical output (prism_inference.OUTPUT_KEYS / INPUT_KEYS / EVENT_KEYS). */
+export const OUTPUT_KEYS = Object.freeze([
+  "contract_version", "baseline_id", "detector_model_sha256", "recording_status", "error", "input",
+  "baseline_domain_validated", "feature_order", "n_events", "n_scored", "events", "interpretation",
+]);
+export const INPUT_KEYS = Object.freeze([
+  "sample_rate", "n_samples", "duration_s", "input_domain", "recording_id", "recorded_at",
+]);
+export const EVENT_KEYS = Object.freeze([
+  "event_id", "start_time", "end_time", "duration_s", "detector_confidence", "detector_max_confidence",
+  "window_count", "status", "not_scoreable_reasons", "anomaly_score", "feature_values",
+  "feature_z_scores", "mean_rms",
+]);
+
 // ─── Interpretation Text ─────────────────────────────────────────────────────
 
 export const SCORE_INTERPRETATION =

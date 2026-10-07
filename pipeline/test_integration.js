@@ -1,10 +1,10 @@
-import InferencePipeline from './InferencePipeline.js';
+import { createNodePipeline } from './runtime/node.js';
 import SimulatedPcmSource from './sources/SimulatedPcmSource.js';
 
 async function testIntegration() {
     console.log("Starting Stage 6 DSP -> ONNX Integration Test");
     
-    const pipeline = new InferencePipeline();
+    const pipeline = await createNodePipeline(); // detector injected (onnxruntime-node)
     // 0.5s of audio @ 8000Hz = 4000 samples
     const source = new SimulatedPcmSource({ durationS: 0.5, pattern: 'sine' });
     

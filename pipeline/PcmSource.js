@@ -7,7 +7,13 @@
  *
  * This abstraction ensures the rest of the pipeline never needs to know
  * whether audio came from a file, a simulated signal, or a Bluetooth device.
+ *
+ * acquire() must resolve to PcmData: mono float32 samples, sampleRate, channels = 1,
+ * sourceType, sourceId (recording_id or null), recordedAt (ISO 8601 / Date / null) and
+ * inputDomain ('reference_dataset' | 'prism_hardware' | 'unknown').
  */
+
+import { checkInput } from "./contract.js";
 
 /**
  * @abstract
@@ -43,46 +49,17 @@ export default class PcmSource {
   }
 
   /**
-   * Validate that the acquired PCM data meets the pipeline contract.
+   * Validate that the acquired PCM data meets the inference contract's input rules.
+   * Same check as InferencePipeline.run() (contract.checkInput / prism_inference.check_input).
    *
    * @param {import('./types').PcmData} pcmData
-   * @returns {{ valid: boolean, errors: string[] }}
+   * @returns {{ valid: boolean, errors: string[] }} errors holds the contract INPUT_ERROR code
    */
   static validate(pcmData) {
-    const errors = [];
-
     if (!pcmData) {
-      return { valid: false, errors: ["pcmData is null or undefined"] };
+      return { valid: false, errors: ["invalid_shape"] };
     }
-
-    if (!(pcmData.samples instanceof Float32Array)) {
-      errors.push("samples must be a Float32Array");
-    }
-
-    if (pcmData.sampleRate !== 8000) {
-      errors.push(`sampleRate must be 8000, got ${pcmData.sampleRate}`);
-    }
-
-    if (pcmData.channels !== 1) {
-      errors.push(`channels must be 1 (mono), got ${pcmData.channels}`);
-    }
-
-    if (pcmData.samples && pcmData.samples.length < 1536) {
-      errors.push(
-        `samples too short: ${pcmData.samples.length} < 1536 minimum`
-      );
-    }
-
-    // Check for non-finite values
-    if (pcmData.samples) {
-      for (let i = 0; i < pcmData.samples.length; i++) {
-        if (!isFinite(pcmData.samples[i])) {
-          errors.push(`non-finite sample at index ${i}`);
-          break; // One is enough to report
-        }
-      }
-    }
-
-    return { valid: errors.length === 0, errors };
+    const { error } = checkInput(pcmData);
+    return { valid: error === null, errors: error === null ? [] : [error] };
   }
 }

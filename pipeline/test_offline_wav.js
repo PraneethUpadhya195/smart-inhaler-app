@@ -1,5 +1,5 @@
 import fs from 'fs';
-import InferencePipeline from './InferencePipeline.js';
+import { createNodePipeline } from './runtime/node.js';
 import WavPcmSource from './sources/WavPcmSource.js';
 
 function computeMAE(arr1, arr2) {
@@ -16,7 +16,7 @@ async function testWavParity() {
     
     const refData = JSON.parse(fs.readFileSync('pipeline/wav_parity_reference.json', 'utf8'));
     
-    const pipeline = new InferencePipeline();
+    const pipeline = await createNodePipeline(); // detector injected (onnxruntime-node)
     const source = new WavPcmSource('assets/ml/v2_validation/golden/inputs/white_noise_3s_minus20dBFS.wav');
     
     const pcmData = await source.acquire();
