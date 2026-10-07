@@ -11,6 +11,78 @@ import { DSP_CONSTANTS } from './dsp_constants.js';
  * 40 MFCC | 40 delta | 40 delta-delta | centroid/4000 | flatness | rolloff(0.85)/4000 | ZCR
  */
 
+/**
+ * |z| of a complex64 value exactly as numpy 2.x computes np.abs on complex64 in the research
+ * environment (numpy 2.4.6, x86-64 with FMA3; SIMD kernel simd_cabsolute_f32):
+ *   larger * sqrt(fma(r, r, 1)) with r = smaller / larger, every step rounded to float32.
+ * This is not a correctly rounded hypot; it differs from float32(hypot(re, im)) by one ulp in
+ * about 45% of bins, enough to flip a rolloff bin (F15). Verified bit-identical with
+ * np.abs(librosa.stft(...)) on 589,143 magnitudes of three reference recordings.
+ * @param {number} re - float32 value
+ * @param {number} im - float32 value
+ * @returns {number} float32 value
+ */
+function complex64Abs(re, im) {
+  const a = Math.abs(re);
+  const b = Math.abs(im);
+  if (a === Infinity || b === Infinity) return Infinity;
+  const larger = Math.max(a, b);
+  const smaller = Math.min(a, b);
+  if (larger === 0) return 0;
+  const ratio = Math.fround(smaller / larger);
+  return Math.fround(Math.fround(Math.sqrt(Math.fround(ratio * ratio + 1))) * larger);
+}
+
+/**
+ * |STFT| of one frame as librosa 0.11 computes it (librosa.stft, then np.abs):
+ * the frame is multiplied by the float64 Hann window in float64, transformed in float64, and
+ * stored as complex64, so re and im are rounded to float32; the magnitude is numpy's complex64
+ * absolute value (complex64Abs) and the power (librosa `S**2`) is its float32 square.
+ * @param {FFT} fft - fft.js instance for nFft
+ * @param {Float32Array} padded - centre-padded signal
+ * @param {number} start - first sample of the frame in `padded`
+ * @param {ArrayLike<number>} window - Hann window (float64), length nFft
+ * @returns {{ mag: Float32Array, power: Float32Array }} nFft / 2 + 1 bins each
+ */
+export function frameSpectrum(fft, padded, start, window) {
+  const nFft = window.length;
+  const frame = new Float64Array(nFft);
+  for (let j = 0; j < nFft; j++) frame[j] = padded[start + j] * window[j];
+  const out = fft.createComplexArray();
+  fft.realTransform(out, frame);
+  const numBins = nFft / 2 + 1;
+  const mag = new Float32Array(numBins);
+  const power = new Float32Array(numBins);
+  for (let k = 0; k < numBins; k++) {
+    const m = complex64Abs(Math.fround(out[2 * k]), Math.fround(out[2 * k + 1]));
+    mag[k] = m;
+    power[k] = Math.fround(m * m);
+  }
+  return { mag, power };
+}
+
+/**
+ * Spectral rolloff frequency as librosa.feature.spectral_rolloff: the lowest bin frequency at
+ * which the cumulative magnitude reaches roll_percent of the total. librosa accumulates in
+ * float32 (np.cumsum of a float32 spectrogram) and forms the threshold in float32, so this does
+ * too: the bin can flip when the float64 sum lands on the other side of the threshold (F15).
+ * @param {Float32Array} mag
+ * @param {ArrayLike<number>} freqs - bin frequencies (Hz)
+ * @param {number} rollPercent - 0.85
+ * @returns {number} frequency in Hz (NaN if the spectrum is not finite)
+ */
+export function rolloffFrequency(mag, freqs, rollPercent) {
+  let total = 0;
+  for (let k = 0; k < mag.length; k++) total = Math.fround(total + mag[k]);
+  const threshold = Math.fround(Math.fround(rollPercent) * total);
+  let cumsum = 0;
+  for (let k = 0; k < mag.length; k++) {
+    cumsum = Math.fround(cumsum + mag[k]);
+    if (cumsum >= threshold) return freqs[k];
+  }
+  return NaN;
+}
+
 export class DspEngine {
   constructor() {
     this.n_fft = PIPELINE_CONFIG.nFft;
@@ -65,31 +137,11 @@ export class DspEngine {
     for (let i = 0; i < numFrames; i++) {
       const start = i * this.hop;
       
-      // Extract frame and apply Hann window
-      const frame = new Float32Array(this.n_fft);
-      for (let j = 0; j < this.n_fft; j++) {
-        frame[j] = paddedPcm[start + j] * this.hann_window[j];
-      }
-      
-      // FFT
-      const outComplex = this.fft.createComplexArray();
-      this.fft.realTransform(outComplex, frame);
-      this.fft.completeSpectrum(outComplex);
-      
-      // Magnitude & Power (first n_fft/2 + 1 bins)
-      const numBins = Math.floor(this.n_fft / 2) + 1;
-      const mag = new Float32Array(numBins);
-      const power = new Float32Array(numBins);
-      
+      // Hann-windowed frame → |STFT| and power, as librosa computes them
+      const { mag, power } = frameSpectrum(this.fft, paddedPcm, start, this.hann_window);
+      const numBins = mag.length;
       let sumMag = 0;
-      for (let k = 0; k < numBins; k++) {
-        const re = outComplex[2 * k];
-        const im = outComplex[2 * k + 1];
-        const m = Math.sqrt(re * re + im * im);
-        mag[k] = m;
-        power[k] = m * m;
-        sumMag += m;
-      }
+      for (let k = 0; k < numBins; k++) sumMag += mag[k];
       
       magnitudes[i] = mag;
       powerSpectra[i] = power;
@@ -113,18 +165,8 @@ export class DspEngine {
       const arithMean = sumPower / numBins;
       flatnesses[i] = arithMean > 0 ? geoMean / arithMean : 0;
       
-      // Spectral Rolloff (0.85)
-      const threshold = 0.85 * sumMag;
-      let cumsum = 0;
-      let rolloffFreq = 0;
-      for (let k = 0; k < numBins; k++) {
-        cumsum += mag[k];
-        if (cumsum >= threshold) {
-          rolloffFreq = this.fft_freqs[k];
-          break;
-        }
-      }
-      rolloffs[i] = rolloffFreq / 4000.0;
+      // Spectral Rolloff (0.85), float32 accumulation as librosa
+      rolloffs[i] = rolloffFrequency(mag, this.fft_freqs, PIPELINE_CONFIG.rolloffPercent) / 4000.0;
       
       // Mel Filterbank
       const n_mels = this.mel_basis.length;
@@ -260,31 +302,38 @@ export class DspEngine {
   }
   
   /**
-   * Compute ZCR
-   * frame 2048, hop 64, center=True
-   * @param {Float32Array} pcm 
-   * @param {number} numFrames 
+   * Zero-crossing rate as librosa.feature.zero_crossing_rate(y, frame_length=2048, hop_length=64,
+   * center=True) in librosa 0.11:
+   *   - the signal is edge-padded (np.pad mode "edge") by 1024 samples on each side;
+   *   - zero_crossings(threshold=1e-10, zero_pos=True, pad=False): samples with |y| <= 1e-10
+   *     are set to 0, the sign is np.signbit (so 0 counts as positive), and a crossing is a
+   *     sign change between consecutive samples; the first sample of a frame is never one;
+   *   - the rate is the mean over the 2048 entries of the frame.
+   * The threshold is compared in float32, as numpy does for a float32 signal.
+   * @param {Float32Array} pcm
+   * @param {number} numFrames
    */
   _computeZCR(pcm, numFrames) {
     const frameSize = 2048;
-    const pad = Math.floor(frameSize / 2); // 1024
-    const paddedPcm = new Float32Array(pcm.length + 2 * pad);
-    paddedPcm.set(pcm, pad);
-    
+    const pad = frameSize / 2;
+    const threshold = Math.fround(1e-10);
+    const n = pcm.length;
+    const negative = (v) => v < -threshold; // signbit after zeroing |v| <= threshold
+    const isNeg = new Uint8Array(n + 2 * pad);
+    for (let i = 0; i < pad; i++) isNeg[i] = negative(pcm[0]) ? 1 : 0;
+    for (let i = 0; i < n; i++) isNeg[pad + i] = negative(pcm[i]) ? 1 : 0;
+    for (let i = 0; i < pad; i++) isNeg[pad + n + i] = negative(pcm[n - 1]) ? 1 : 0;
+
+    // crossingsBefore[j] = number of sign changes between positions (k-1, k) for 1 <= k <= j
+    const crossingsBefore = new Int32Array(isNeg.length);
+    for (let j = 1; j < isNeg.length; j++) {
+      crossingsBefore[j] = crossingsBefore[j - 1] + (isNeg[j] !== isNeg[j - 1] ? 1 : 0);
+    }
     const zcrs = new Float32Array(numFrames);
     for (let i = 0; i < numFrames; i++) {
       const start = i * this.hop;
-      let zcr = 0;
-      // librosa zcr uses: y[i] * y[i-1] <= 0 (where 0 counts as crossing only if preceded by non-zero? 
-      // actually librosa computes mean of boolean array of sign changes)
-      for (let j = 1; j < frameSize; j++) {
-        const cur = paddedPcm[start + j];
-        const prev = paddedPcm[start + j - 1];
-        if ((cur > 0 && prev <= 0) || (cur <= 0 && prev > 0)) {
-          zcr++;
-        }
-      }
-      zcrs[i] = zcr / frameSize;
+      const count = crossingsBefore[start + frameSize - 1] - crossingsBefore[start];
+      zcrs[i] = count / frameSize;
     }
     return zcrs;
   }

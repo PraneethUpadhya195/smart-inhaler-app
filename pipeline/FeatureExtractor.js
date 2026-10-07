@@ -1,6 +1,7 @@
 import FFT from 'fft.js';
 import { PIPELINE_CONFIG } from './versions.js';
 import { DSP_CONSTANTS } from './dsp_constants.js';
+import { frameSpectrum, rolloffFrequency } from './dsp.js';
 import { featureSchemaV2 } from './contractAssets.js';
 
 /**
@@ -96,28 +97,11 @@ export class FeatureExtractor {
         for (let i = 0; i < numFrames; i++) {
             const start = i * this.hop;
             
-            const frame = new Float32Array(this.n_fft);
-            for (let j = 0; j < this.n_fft; j++) {
-                frame[j] = paddedPcm[start + j] * this.hann_window[j];
-            }
-            
-            const outComplex = this.fft.createComplexArray();
-            this.fft.realTransform(outComplex, frame);
-            this.fft.completeSpectrum(outComplex);
-            
-            const numBins = Math.floor(this.n_fft / 2) + 1;
-            const mag = new Float32Array(numBins);
-            const power = new Float32Array(numBins);
-            
+            // |STFT| and power exactly as the frame features (dsp.frameSpectrum, librosa)
+            const { mag, power } = frameSpectrum(this.fft, paddedPcm, start, this.hann_window);
+            const numBins = mag.length;
             let sumMag = 0;
-            for (let k = 0; k < numBins; k++) {
-                const re = outComplex[2 * k];
-                const im = outComplex[2 * k + 1];
-                const m = Math.sqrt(re * re + im * im);
-                mag[k] = m;
-                power[k] = m * m;
-                sumMag += m;
-            }
+            for (let k = 0; k < numBins; k++) sumMag += mag[k];
             
             // Centroid
             let num = 0;
@@ -138,18 +122,8 @@ export class FeatureExtractor {
             const arithMean = sumPower / numBins;
             flatnesses[i] = arithMean > 0 ? geoMean / arithMean : 0;
             
-            // Rolloff
-            const threshold = 0.85 * sumMag;
-            let cumsum = 0;
-            let rolloffFreq = 0;
-            for (let k = 0; k < numBins; k++) {
-                cumsum += mag[k];
-                if (cumsum >= threshold) {
-                    rolloffFreq = this.fft_freqs[k];
-                    break;
-                }
-            }
-            rolloffs[i] = rolloffFreq / 4000.0;
+            // Rolloff (0.85), float32 accumulation as librosa (F15)
+            rolloffs[i] = rolloffFrequency(mag, this.fft_freqs, PIPELINE_CONFIG.rolloffPercent) / 4000.0;
         }
         
         return { centroids, flatnesses, rolloffs };

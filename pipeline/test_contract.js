@@ -9,7 +9,7 @@
  * 2. Every output is validated twice: by contract.validateOutput (prism_inference.validate_output)
  *    and by Ajv against inference_output.schema.json (JSON Schema 2020-12).
  * 3. Unit checks: input error codes, baseline validation, output validation, JSON safety,
- *    SHA-256, WAV decoding.
+ *    SHA-256, WAV decoding, and DSP semantics against librosa fixtures (ZCR, rolloff).
  *
  * Run: node pipeline/test_contract.js   (part of npm test)
  */
@@ -26,6 +26,7 @@ import { createNodePipeline, MODEL_URL } from "./runtime/node.js";
 import { checkInput, validateOutput, roundHalfEven, ContractError } from "./contract.js";
 import { sha256Hex } from "./sha256.js";
 import { decodeWav, WavDecodeError } from "./wav.js";
+import { DspEngine, rolloffFrequency } from "./dsp.js";
 import { baselineV2 } from "./contractAssets.js";
 import { MODEL_SHA256, V2_FEATURE_ORDER } from "./versions.js";
 
@@ -275,11 +276,27 @@ function sha256AndWav() {
   check(threw, "non-WAV bytes rejected");
 }
 
+function dspFixtures() {
+  console.log("6. DSP semantics (librosa fixtures)");
+  // pipeline/zcr_reference.json: librosa.feature.zero_crossing_rate on an edge-case signal
+  // (tools/pipeline_compat/make_zcr_fixture.py). Must match exactly (counts / 2048).
+  const ref = readJson(new URL("pipeline/zcr_reference.json", ROOT));
+  const y = Float32Array.from(ref.signal_float32);
+  const zcr = new DspEngine()._computeZCR(y, 1 + Math.floor(y.length / 64));
+  check(zcr.length === ref.zcr.length && Array.from(zcr).every((v, i) => v === ref.zcr[i]),
+    `ZCR equals librosa ${ref.librosa_version} on all ${ref.zcr.length} frames`);
+  // Rolloff threshold in float32 (librosa): cumulative 0.425 + 0.425 = 0.85 reaches 0.85 * 1.0 at bin 1.
+  const freqs = [0, 31.25, 62.5];
+  check(rolloffFrequency(Float32Array.of(0.425, 0.425, 0.15), freqs, 0.85) === 31.25, "rolloff at the threshold bin");
+  check(rolloffFrequency(new Float32Array(3), freqs, 0.85) === 0, "rolloff of a silent frame is 0 Hz (librosa)");
+}
+
 await goldenCases();
 await inputErrors();
 baselineValidation();
 await outputValidation();
 sha256AndWav();
+dspFixtures();
 
 console.log(`\n${passed} checks passed, ${failed} failed, ${skipped} golden case(s) skipped`);
 if (skipped > 0 && process.env.PRISM_REQUIRE_DATASET === "1") {
