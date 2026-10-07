@@ -7,7 +7,6 @@ import { AppProvider, useAppContext } from "./context/AppContext";
 import AppNavigator from "./navigation/AppNavigator";
 
 import { signInAnonymously } from "./services/authService";
-import { seedSampleData, getSessions } from "./services/sessionService";
 import { getDevice } from "./services/deviceService";
 import { getLastDevice, clearLastDevice } from "./services/storageService";
 import * as bleService from "./services/bleService";
@@ -52,8 +51,7 @@ function AppRoot() {
         const userId = await signInAnonymously();
         initUser(userId);
 
-        // 2. Seed sample data if Firestore sessions collection is empty
-        await seedSampleData(userId);
+        // 2. No seeding: a new user starts with an empty history.
 
         // 3. Load sessions into context
         await loadSessions(userId);

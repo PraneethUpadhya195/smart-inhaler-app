@@ -53,7 +53,7 @@ export function AppProvider({ children }) {
 
   /**
    * Prepends a session object that was already saved to Firestore (BLE path).
-   * Used by DeviceScreen after completeBleSession / interruptBleSession.
+   * (No BLE session writer exists yet; kept for a future BLE path.)
    * @param {Object} session — must include id
    */
   const prependSession = useCallback((session) => {

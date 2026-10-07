@@ -74,6 +74,8 @@ export default class SimulatedPcmSource extends PcmSource {
       sourceType: this.sourceType,
       sourceId: this.sourceId ?? `simulated_${this.pattern}_${this.durationS}s`,
       recordedAt: new Date(),
+      // Synthetic audio is neither reference-dataset nor PRISM-hardware audio.
+      inputDomain: "unknown",
     };
   }
 

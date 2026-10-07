@@ -3,6 +3,7 @@ import WavPcmSource from './sources/WavPcmSource.js';
 import { createNodePipeline } from './runtime/node.js';
 import BaselineStore from './BaselineStore.js';
 import SessionAggregator from './SessionAggregator.js';
+import { canonicalOutput } from './test_fixtures.js';
 
 function assert(condition, message) {
     if (!condition) {
@@ -101,20 +102,18 @@ async function testHarness() {
     
     // 7. Session Aggregation
     console.log("7. Testing Session Aggregation...");
-    const rec1 = { input: { recording_id: "rec_1" }, nEvents: 2, nScored: 1, events: [
-        { eventId: 0, startTime: 1.0, status: 'SCORE_ONLY', anomalyScore: 2.0 },
-        { eventId: 1, startTime: 2.0, status: 'NOT_SCOREABLE' }
-    ]};
-    const rec2 = { input: { recording_id: "rec_2" }, nEvents: 1, nScored: 1, events: [
-        { eventId: 0, startTime: 5.0, status: 'SCORE_ONLY', anomalyScore: 1.0 }
-    ]};
+    // Canonical outputs of run() (inference_output.schema.json)
+    const rec1 = canonicalOutput("rec_1", null, [{ start: 1.0, score: 2.0 }, { start: 2.5, reasons: ["short_duration"] }]);
+    const rec2 = canonicalOutput("rec_2", null, [{ start: 5.0, score: 1.0 }]);
     const aggregator = new SessionAggregator();
     const sess = aggregator.aggregate("sess_golden", [rec1, rec2]);
-    assert(sess.nEvents === 3, "Should aggregate 3 events");
-    assert(sess.nScored === 2, "Should aggregate 2 scored events");
-    assertClose(sess.aggregateScores.mean, 1.5, 0.01, "Golden mean session score");
-    assertClose(sess.aggregateScores.min, 1.0, 0.01, "Golden min session score");
-    assertClose(sess.aggregateScores.max, 2.0, 0.01, "Golden max session score");
+    assert(sess.n_events === 3, "Should aggregate 3 events");
+    assert(sess.n_scored === 2, "Should aggregate 2 scored events");
+    assert(sess.session_status === "SCORE_ONLY", "Session with scored events");
+    const summary = sess.diagnostics.anomaly_score_summary; // internal diagnostic, not displayed
+    assertClose(summary.mean, 1.5, 0.01, "Golden mean session score");
+    assertClose(summary.min, 1.0, 0.01, "Golden min session score");
+    assertClose(summary.max, 2.0, 0.01, "Golden max session score");
     
     console.log("\n✅ ALL REGRESSION TESTS PASSED (100%)");
 }

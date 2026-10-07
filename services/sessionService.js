@@ -2,14 +2,12 @@ import {
   collection,
   addDoc,
   getDocs,
-  doc,
-  updateDoc,
   query,
   orderBy,
   serverTimestamp,
 } from "firebase/firestore";
 import { db } from "../firebase/firebaseConfig";
-import { generateSeedSessions } from "./simulationService";
+import { assertFirestoreSafe, isLegacyRecord } from "./sessionRecord";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -17,15 +15,14 @@ function sessionsRef(userId) {
   return collection(db, "users", userId, "sessions");
 }
 
-function sessionDocRef(userId, sessionId) {
-  return doc(db, "users", userId, "sessions", sessionId);
-}
-
 // ─── Read ──────────────────────────────────────────────────────────────────────
 
 /**
  * Fetches all sessions for a user ordered by timestamp desc.
  * Excludes "in_progress" sessions from the visible history.
+ *
+ * Documents written by earlier app versions (GOOD/POOR schema, camelCase pipeline schema) are
+ * returned with `legacy: true` and are not interpreted by the UI. They are not deleted.
  *
  * @param {string} userId
  * @returns {Promise<Array>} array of session objects with id
@@ -38,21 +35,27 @@ export async function getSessions(userId) {
     .map((d) => ({
       id: d.id,
       ...d.data(),
+      legacy: isLegacyRecord(d.data()),
       // Convert Firestore Timestamp → JS Date for consistent handling in UI
       timestamp: d.data().timestamp?.toDate ? d.data().timestamp.toDate() : new Date(d.data().timestamp),
     }))
     .filter((s) => s.status !== "in_progress");
 }
 
-// ─── Write (Simulation) ────────────────────────────────────────────────────────
+// ─── Write ─────────────────────────────────────────────────────────────────────
 
 /**
- * Adds a complete simulation session to Firestore.
+ * Stores one session record (services/sessionRecord.buildSessionRecord): the canonical contract
+ * outputs plus app metadata. `timestamp` is the time the record was stored (server time);
+ * the recording's own start time is `recorded_at`.
+ *
  * @param {string} userId
- * @param {Object} sessionData — from simulationService.generateMockSession()
+ * @param {Object} sessionData — a session record, e.g. from simulationService.runSimulatedSession()
  * @returns {Promise<string>} new session document ID
+ * @throws if the record is not plain JSON that Firestore can store unchanged
  */
 export async function addSession(userId, sessionData) {
+  assertFirestoreSafe(sessionData);
   const ref = await addDoc(sessionsRef(userId), {
     ...sessionData,
     timestamp: serverTimestamp(),
@@ -60,65 +63,6 @@ export async function addSession(userId, sessionData) {
   return ref.id;
 }
 
-// ─── Write (BLE) ───────────────────────────────────────────────────────────────
-
-/**
- * Creates a BLE session doc with status "in_progress" at session start.
- * @param {string} userId
- * @param {string} deviceId
- * @returns {Promise<string>} sessionId to pass to completeBleSession / interruptBleSession
- */
-export async function startBleSession(userId, deviceId) {
-  const ref = await addDoc(sessionsRef(userId), {
-    timestamp: serverTimestamp(),
-    duration: null,
-    event_classification: null,
-    quality_assessment: null,
-    technique_flags: null,
-    source: "ble",
-    status: "in_progress",
-    deviceId,
-  });
-  return ref.id;
-}
-
-/**
- * Updates a BLE session to "complete" with full inhalation data.
- * @param {string} userId
- * @param {string} sessionId
- * @param {Object} data — { duration, quality, errors, label }
- */
-export async function completeBleSession(userId, sessionId, data) {
-  await updateDoc(sessionDocRef(userId, sessionId), {
-    ...data,
-    status: "complete",
-  });
-}
-
-/**
- * Marks a BLE session as "interrupted" when device disconnects mid-session.
- * Saves whatever partial data is available.
- * @param {string} userId
- * @param {string} sessionId
- * @param {Object} partialData — whatever data was collected before disconnect
- */
-export async function interruptBleSession(userId, sessionId, partialData = {}) {
-  await updateDoc(sessionDocRef(userId, sessionId), {
-    ...partialData,
-    status: "interrupted",
-  });
-}
-
-// ─── Seed ──────────────────────────────────────────────────────────────────────
-
-/**
- * Seeds sample sessions if the user's sessions collection is empty.
- * @param {string} userId
- */
-export async function seedSampleData(userId) {
-  const snapshot = await getDocs(sessionsRef(userId));
-  if (!snapshot.empty) return;
-
-  const seeds = generateSeedSessions();
-  await Promise.all(seeds.map((s) => addDoc(sessionsRef(userId), s)));
-}
+// There is no first-launch seeding: a new user starts with an empty history (F4).
+// There are no BLE session writers: no BLE audio source exists yet (F11). A future BLE path
+// will deliver PCM to the same pipeline and store its result with addSession().

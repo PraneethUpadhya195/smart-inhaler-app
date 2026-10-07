@@ -12,7 +12,6 @@ import { Ionicons } from "@expo/vector-icons";
 import { useAppContext } from "../context/AppContext";
 import * as bleService from "../services/bleService";
 import * as deviceService from "../services/deviceService";
-import * as sessionService from "../services/sessionService";
 import * as storageService from "../services/storageService";
 import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
 
@@ -25,15 +24,12 @@ export default function DeviceScreen() {
     batteryLevel,
     setDeviceConnected,
     setDeviceDisconnected,
-    prependSession,
   } = useAppContext();
 
   const [isConnecting, setIsConnecting] = useState(false);
   const [isDisconnecting, setIsDisconnecting] = useState(false);
   const [isBeeping, setIsBeeping] = useState(false);
 
-  // Track in-progress BLE session ID so we can interrupt it on disconnect
-  const activeBleSessionId = useRef(null);
   const unsubscribeRef = useRef(null);
 
   const isConnected = deviceStatus === "Connected";
@@ -53,32 +49,8 @@ export default function DeviceScreen() {
       // Update context
       setDeviceConnected({ deviceId: id, deviceName: name, batteryLevel: battery });
 
-      // Subscribe to BLE inhalation events
-      unsubscribeRef.current = bleService.subscribeToInhalationEvents(
-        async (eventData) => {
-          // BLE session completed successfully
-          if (activeBleSessionId.current) {
-            await sessionService.completeBleSession(userId, activeBleSessionId.current, {
-              ...eventData,
-              source: "ble",
-            });
-            const completedSession = {
-              id: activeBleSessionId.current,
-              ...eventData,
-              source: "ble",
-              status: "complete",
-              deviceId: id,
-              timestamp: new Date(),
-            };
-            prependSession(completedSession);
-            activeBleSessionId.current = null;
-          }
-        }
-      );
-
-      // Start tracking the BLE session in Firestore
-      const sessionId = await sessionService.startBleSession(userId, id);
-      activeBleSessionId.current = sessionId;
+      // No BLE audio source exists yet, so no session is created from the (simulated) device.
+      unsubscribeRef.current = bleService.subscribeToInhalationEvents(() => {});
     } catch (e) {
       Alert.alert("Connection Failed", "Could not connect to device. Please try again.");
       console.error("[DeviceScreen] Connect error:", e);
@@ -96,29 +68,6 @@ export default function DeviceScreen() {
       if (unsubscribeRef.current) {
         unsubscribeRef.current();
         unsubscribeRef.current = null;
-      }
-
-      // If a session was in progress, mark it interrupted
-      if (activeBleSessionId.current) {
-        await sessionService.interruptBleSession(userId, activeBleSessionId.current, {
-          duration: null,
-          event_classification: null,
-          quality_assessment: null,
-          technique_flags: null,
-        });
-        const interruptedSession = {
-          id: activeBleSessionId.current,
-          source: "ble",
-          status: "interrupted",
-          deviceId,
-          duration: null,
-          event_classification: null,
-          quality_assessment: null,
-          technique_flags: null,
-          timestamp: new Date(),
-        };
-        prependSession(interruptedSession);
-        activeBleSessionId.current = null;
       }
 
       await bleService.disconnectDevice();

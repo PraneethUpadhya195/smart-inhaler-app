@@ -10,7 +10,8 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useAppContext } from "../context/AppContext";
-import { generateMockSession } from "../services/simulationService";
+import { runSimulatedSession } from "../services/simulationService";
+import { getPipeline } from "../services/inferenceService";
 import ResultBadge from "../components/ResultBadge";
 import ProgressBar from "../components/ProgressBar";
 import StatusTag from "../components/StatusTag";
@@ -27,7 +28,7 @@ export default function DashboardScreen() {
   async function handleSimulate() {
     setIsSimulating(true);
     try {
-      const session = generateMockSession();
+      const session = await runSimulatedSession(getPipeline);
       await addNewSession(session);
     } catch (e) {
       Alert.alert("Error", "Failed to save session. Check your Firebase config.");

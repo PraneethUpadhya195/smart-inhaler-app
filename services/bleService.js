@@ -13,11 +13,13 @@
  *   getConnectionStatus()          → "Connected" | "Disconnected"
  *   getBatteryLevel()              → number | null
  *   triggerBeep()                  → Promise<void>
- *   subscribeToInhalationEvents(callback) → unsubscribe fn
- *     callback receives: { duration, event_classification, quality_assessment, technique_flags }
+ *   subscribeToInhalationEvents(callback) → unsubscribe fn (never calls back: no BLE audio source yet)
+ *
+ * BLE audio is NOT implemented. Planned path (research ARCHITECTURE.md §5): BLE packets →
+ * reassembly → a BlePcmSource (int16 = s24 >> 8, 8 kHz, inputDomain "prism_hardware") →
+ * the same InferencePipeline.run(). No fake inhalation events are produced.
  */
 
-import { generateMockSession } from "./simulationService";
 
 // ─── Internal State ────────────────────────────────────────────────────────────
 
@@ -125,35 +127,7 @@ export async function triggerBeep() {
  * @param {Function} callback — called with { duration, event_classification, quality_assessment, technique_flags }
  * @returns {Function} unsubscribe — call to cancel the pending event
  */
-export function subscribeToInhalationEvents(callback) {
-  if (_connectionStatus !== "Connected") {
-    console.warn("[BLE] subscribeToInhalationEvents called but device is not connected.");
-    return () => {};
-  }
-
-  let cancelled = false;
-
-  _pendingEventTimer = setTimeout(() => {
-    _pendingEventTimer = null;
-    if (!cancelled) {
-      const session = generateMockSession();
-      console.log("[BLE] 📡 Inhalation event received:", session);
-      callback({
-        duration: session.duration,
-        event_classification: session.event_classification,
-        quality_assessment: session.quality_assessment,
-        technique_flags: session.technique_flags,
-        model_version: session.model_version,
-        app_version: session.app_version,
-      });
-    }
-  }, 3000); // 3s simulates a BLE inhalation event
-
-  return function unsubscribe() {
-    cancelled = true;
-    if (_pendingEventTimer) {
-      clearTimeout(_pendingEventTimer);
-      _pendingEventTimer = null;
-    }
-  };
+export function subscribeToInhalationEvents(callback) { // eslint-disable-line no-unused-vars
+  console.warn("[BLE] No BLE audio source is implemented: no inhalation events will be delivered.");
+  return function unsubscribe() {};
 }
