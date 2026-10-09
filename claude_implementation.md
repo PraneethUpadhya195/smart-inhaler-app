@@ -198,6 +198,136 @@ See the three fix commits above (`git show --stat`). Tooling added: `tools/pipel
 
 ---
 
+# Entry 4 — 2026-10-09: Android ONNX Runtime registration fix and on-device pipeline verification
+
+## Objective
+Task brief: `prompt.md` (untracked). Two goals:
+1. Fix the Android crash `[runtime not ready]: TypeError: Cannot read property 'install' of null` at JS start-up.
+2. Prove that the PRISM inference v2 pipeline runs end to end on a real phone and matches the references.
+
+Environment:
+- Expo SDK 57.0.27, RN 0.86.3 (bridgeless / New Architecture), Hermes;
+- onnxruntime-react-native 1.24.3;
+- phone: OnePlus Nord CE 2 (IV2201), Android 13, arm64-v8a;
+- Node 24.11.1, JDK 17.
+
+## Root cause (V = verified in this session, R = read in code)
+1. **Expo autolinking drops the package on Android (V).** onnxruntime-react-native 1.24.3 ships `unimodule.json` (platforms ios + android) and no `react-native.config.js`.
+   - Expo's RN-config resolver (`expo-modules-autolinking/build/reactNativeConfig/androidResolver.js`) returns `null` for a package that has no RN config, has an Expo-module config that supports Android, and has a gradle file. So `npx expo-modules-autolinking react-native-config --platform android` did not list the package.
+   - Expo-modules autolinking (`resolve --platform android`) includes the package's gradle project but registers nothing: `modules: [], packages: []`.
+   - Net effect: the native libraries were built and packaged, but `OnnxruntimePackage` was missing from `PackageList.java`. So `NativeModules.Onnxruntime === null`, and the package's `binding.js` calls `Module.install()` at import time.
+   - The import chain is `index.js → … → services/inferenceService → pipeline/runtime/reactNative.js → onnxruntime-react-native`, so the app crashed during JS initialisation.
+2. **Upstream confirms it (V):** microsoft/onnxruntime#28266 (2026-04-30), "Add react-native.config.js … to fix autolinking". It adds exactly this Android `packageImportPath`/`packageInstance`, but it is not in any npm release (latest is 1.24.3).
+3. **The New Architecture is not the cause (R, then V on device).**
+   - `OnnxruntimeModule` is a legacy bridge module. Its synchronous `install()` loads `libonnxruntimejsi.so` and installs the JSI `OrtApi` using `getJavaScriptContextHolder()` and `getCatalystInstance().getJSCallInvokerHolder()`.
+   - RN 0.86 bridgeless keeps a `BridgelessCatalystInstance` shim for this, because `UNSTABLE_ENABLE_MINIFY_LEGACY_ARCHITECTURE` is `false` in `ReactAndroid/build.gradle.kts`.
+   - On the device, logcat shows the shim warning and then a successful load of `libonnxruntimejsi.so`. The TurboModule interop layer serves the legacy module.
+4. **The earlier local `if (false)` patch (V).**
+   - Pristine 1.24.3 `android/build.gradle` uses `org.gradle.util.VersionNumber`, which is missing in the Gradle 9.3.1 used here.
+   - The local edit to `if (false)` was not reproducible (it lived only in `node_modules`).
+   - It is replaced by upstream main's condition (`major == 0 && minor < 71`), which is false for RN 0.86 and therefore equivalent here. It is now kept as a patch-package patch.
+
+## What was changed
+- `react-native.config.js` (new): a project-level autolinking override for `onnxruntime-react-native`. It sets Android `packageImportPath: import ai.onnxruntime.reactnative.OnnxruntimePackage;` and `packageInstance: new OnnxruntimePackage()`, the same values as upstream #28266.
+  - No manual `MainApplication` registration and no `node_modules` edit.
+  - iOS autolinking is unchanged (still listed).
+- `patches/onnxruntime-react-native+1.24.3.patch` (new): the `VersionNumber` fix only (`--include build.gradle$`).
+- `package.json`:
+  - `postinstall: patch-package`;
+  - devDependency `patch-package ^8.0.1`;
+  - direct dependencies `expo-asset ~57.0.19` and `expo-file-system ~57.0.7`. `pipeline/runtime/reactNative.js` imports these, and they were previously only transitive (Entry 2, open item 2). `npx expo install` chose the versions already installed.
+  - `package-lock.json` was updated accordingly.
+- `app.json`: `npx expo install` reformatted the user's uncommitted edit and appended an `expo-asset` plugin entry. The entry was removed again (it does nothing without options). The content is otherwise the user's.
+- `index.js`: `if (__DEV__) require('./tools/device_conformance/appRunner').runIfRequested();` This does nothing unless a request file is present.
+- `tools/device_conformance/` (new): `appRunner.js` (on device), `run_device_conformance.mjs` (host), `README.md`.
+- Not changed: pipeline code, model, baseline, contract, schemas, golden vectors (`assets/ml/`), UI, `android/` sources (git-ignored, generated).
+
+## Results (all V unless marked)
+- **Before the fix** (installed pre-fix build, 15:22): logcat has `E ReactNativeJS: [runtime not ready]: TypeError: Cannot read property 'install' of null`, 3 occurrences.
+- **Autolinking:**
+  - after the fix, `react-native-config --platform android` lists `onnxruntime-react-native` with the package import and instance;
+  - `android/app/build/generated/autolinking/.../PackageList.java` contains `new ai.onnxruntime.reactnative.OnnxruntimePackage()`.
+- **Reproducibility:**
+  - `npm ci` reinstalled everything, and `postinstall` re-applied the patch (checked in `build.gradle`).
+  - `npx expo prebuild --clean --platform android --no-install` could not delete the real `android/`: `EBUSY`, a lock held by a process outside this session, which was not killed. Prebuild did not modify `android/`; it was compared with a backup.
+  - So `prebuild --clean` was run in a scratch copy of the project (same `node_modules` via a junction). There, `gradlew :app:generateAutolinkingPackageList` produced `PackageList.java` containing `OnnxruntimePackage`.
+  - The fresh prebuild output differs from the real `android/` only in `gradle.properties` (`reactNativeArchitectures=arm64-v8a`, the user's setting) and `local.properties`.
+- **Build:** `JAVA_HOME=jdk-17; android\gradlew.bat -p android installDebug` → BUILD SUCCESSFUL, installed on IV2201. The APK contains `lib/arm64-v8a/libonnxruntime.so` and `libonnxruntimejsi.so`.
+- **After the fix:**
+  - launch logcat has 0 × `install' of null`, 0 × `OrtApi is not initialized` and 0 × `FATAL EXCEPTION`;
+  - logcat shows `nativeloader: Load …libonnxruntimejsi.so … ok`, then `Running "main"`.
+  - The same holds for both conformance-run logs.
+- **Metro bundle:** the app bundle (`index.bundle?platform=android&dev=true`) does not contain `pipeline/runtime/node.js` or `onnxruntime-node`. The only matches are comments and the runtime-guarded `process.getBuiltinModule("node:fs")` in `WavPcmSource`.
+- **On-device inference:**
+  - Command: `node tools/device_conformance/run_device_conformance.mjs --extra 400 --out <dir> --timeout-s 3600`.
+  - Cases: 371 = 9 golden + 6 invalid/domain + 356 further dataset recordings, i.e. all 361 reference WAVs.
+  - **17,331 checks passed, 0 failed.**
+  - Runtime:
+    - ORT JS 1.24.3, native ORT 1.30.0 (resolved by the package's `latest.integration`), Hermes;
+    - model `features` float32 `[batch_size, 25, 124]` → `logits` float32 `[batch_size, 4]`;
+    - SHA-256 `2e4e72d3…3725` verified on the device from the bundled asset (expo-asset → expo-file-system bytes);
+    - load time 1.46 s.
+  - Device vs Node `run()` (onnxruntime-node 1.30.0), all 371 cases:
+    - statuses, errors, reasons, event counts, window counts and times identical (Δt = 0);
+    - `feature_values`, `mean_rms`, z and `anomaly_score` bit-identical (Δ = 0);
+    - `detector_confidence` max Δ 1.8e-7.
+  - Device vs golden expected (Python reference), 9 cases:
+    - confidence ≤ 1.1e-7;
+    - features ≤ 1.1e-7 relative;
+    - `mean_rms` ≤ 1.4e-7 relative;
+    - z ≤ 8.6e-7;
+    - score ≤ 3.3e-7.
+    - All within the contract tolerances.
+  - Dataset totals on the device: 322 `EVENTS_DETECTED` + 39 `NO_INHALATION_DETECTED`, 364 events, 318 scored, 46 not scoreable (short_duration 32, close_neighbor 25, recording_boundary 1).
+    - These equal the Python reference totals in Entry 2.
+    - Device vs Python per event for all 361 is transitive: device = Node here, and Node = Python in Entry 2.
+  - All device outputs pass Ajv `inference_output.schema.json` and `validateOutput`.
+  - `baseline_domain_validated`: `true` for `reference_dataset`, `false` for `prism_hardware`.
+- **Invalid audio and errors:**
+  - Undecodable bytes and an empty file: `run()` throws `WavDecodeError`, and the session is `PROCESSING_ERROR` with `recordings: []`.
+  - `empty_audio`, `nonfinite_audio`, `amplitude_out_of_range`, `unsupported_sample_rate`, `shorter_than_one_detector_window` → `INPUT_ERROR` with the contract codes.
+  - A tampered model raises `ModelLoadError` (SHA mismatch).
+  - Invalid bytes passed to ORT surface as a JS `Error: No graph was found in the protobuf.` (no native crash).
+  - A failing pipeline factory gives `runSimulatedSession` → `PROCESSING_ERROR` with 0 recordings.
+- **Session layer:** for every case, the record built by `SessionAggregator` + `buildSessionRecord` (`prism-app-session-v1`, `simulated:false`):
+  - holds the canonical output verbatim (`recordings[0]`);
+  - has the matching `session_status` (`NO_INHALATION_DETECTED` stays distinct from `SCORE_ONLY` / `NOT_SCOREABLE`);
+  - has no legacy fields;
+  - passes `assertFirestoreSafe`.
+  - The app's Simulate path on the device → `NO_INHALATION_DETECTED`, `simulated: true`.
+- **Performance (debug build, dev bundle, one ONNX call per window, F13):**
+  - per 12 s recording: median 6.1 s (3.3–8.0 s);
+  - 361 recordings in 36.9 min.
+  - Release build not measured.
+
+## Files changed
+- New: `react-native.config.js`, `patches/onnxruntime-react-native+1.24.3.patch`, `tools/device_conformance/{appRunner.js,run_device_conformance.mjs,README.md}`.
+- Modified: `package.json`, `package-lock.json`, `index.js`, `app.json` (see above), `claude_implementation.md` (this entry).
+- Nothing was committed or pushed.
+
+## Tests
+`npm test`:
+- before the changes: 446 passed, 0 failed, 0 skipped;
+- after the changes (and after `npm ci`): 446 passed, 0 failed, 0 skipped.
+
+## Open issues / next step
+1. **UI does not consume the canonical session record (R; Entry 2 item 1, S1–S4 still open).** These screens read fields that `prism-app-session-v1` does not have, so new sessions show "—"/0:
+   - `DashboardScreen` (`status`, `nEvents`, `aggregateScores`, "Mean Z-Score");
+   - `SessionDetailScreen` (`nEvents`, `aggregateScores`, `ev.eventId`, `notScoreableReasons`);
+   - `SessionCard` (`quality_assessment`);
+   - `IssueList` / `formatters` (legacy technique issues).
+
+   **Conflict for the user:** `prompt.md` defines user-facing NORMAL/ANOMALY meanings, but `CLAUDE.md` §4 forbids NORMAL/ANOMALY outputs while the contract is `DRAFT_NOT_FROZEN`. This needs a decision before UI work.
+2. **Firestore persistence not verified on the device (U).** The phone had no DNS (`auth/network-request-failed`, `Unable to resolve host identitytoolkit.googleapis.com`), so the app showed its "Configuration Error" screen after start-up. The pipeline is unaffected.
+3. **Native ORT version is not pinned.** The package resolves `onnxruntime-android:latest.integration` (1.30.0 today). A future build may pick up a newer native ORT. Consider pinning it in the patch (it matches the onnxruntime-node 1.30.0 used for parity).
+4. **`install()` relies on RN's deprecated bridgeless `CatalystInstance` shim.** Upstream main also uses it. An RN release that removes the shim will break `install()`; the fix then is `getReactApplicationContext().getJSCallInvokerHolder()`.
+5. **Remove `react-native.config.js` and the patch** once an onnxruntime-react-native release contains #28266 and the gradle fix. Note: upstream's new `app.plugin.js` also adds `OnnxruntimePackage` to `MainApplication`; together with autolinking that would register the module twice. Check this when upgrading.
+6. `prompt.md` names the package `com.matiks.app`. That is a different app on the phone; this project is `com.anonymous.smart_inhaler_app`.
+7. Expo CLI with `CI=1` does not watch files: restart Metro after editing app code before a device run.
+8. iOS was not built or verified.
+
+---
+
 # Entry 5 — 2026-10-10: Offline-first session storage, Firestore sync and UI on the canonical session record
 
 ## Objective
@@ -372,3 +502,70 @@ Two weak tests were tightened during this check:
 6. **No network-change listener** (NetInfo was not added). Sync runs at start-up, after each save, on foreground, on Sync now, and after a late confirmation.
 7. **Session IDs:** `session_id` = `sim_sess_<ms>` is unique per device. A future BLE source must produce IDs that pass `isValidSessionId()`.
 8. **README** still describes the old app; `IssueList.js` and `ProgressBar.js` should be deleted (see Files changed).
+
+---
+
+# Entry 6 — 2026-10-10: Separate commit for the Android ONNX Runtime registration fix (Entry 4)
+
+## Objective
+Commit the Entry 4 fix on its own, after the offline-first commit `c222632`:
+- `c222632` is not amended;
+- nothing is pushed;
+- the user's own uncommitted edits stay out of the commit and stay in the working tree.
+
+Evidence labels: **V** = run in this session, **R** = read.
+
+## What was committed and what was not
+**Committed:**
+- `react-native.config.js`;
+- `patches/onnxruntime-react-native+1.24.3.patch`;
+- `package.json`: `postinstall: patch-package` and devDependency `patch-package ^8.0.1`;
+- `package-lock.json`: HEAD plus the root devDependency, the 24 dev-only entries of patch-package's tree, and `hasInstallScript: true`, which is npm's canonical form for a root `postinstall`;
+- `index.js` (the `__DEV__` conformance hook);
+- `tools/device_conformance/`;
+- this log's Entries 4 and 6.
+
+**Not committed (left in the working tree):**
+- **`app.json`**, the user's edit (R, Entry 4): removal of `newArchEnabled`, `splash` and `edgeToEdgeEnabled`, plus the ORT config-plugin entry.
+  - The plugin entry is not needed for the fix (see Results).
+- **The Expo bump** `expo ~57.0.26 → ~57.0.27` and the lock changes that come with it: 39 changed and 11 removed entries, including `expo-modules-autolinking` 57.0.13 → 57.0.14.
+- **The direct dependencies** `expo-asset ~57.0.19` / `expo-file-system ~57.0.7` (Entry 4):
+  - `expo-asset` 57.0.19 needs the bump (HEAD's expo pins `~57.0.18`);
+  - both stay installed transitively at HEAD (57.0.18 / 57.0.7), so the fix does not need them.
+- **Entry 3** (an unrelated audit), `prompt.md`, `rnconfig.json` (empty), `skills-lock.json` and `.claude/`.
+
+No source code was changed in this step.
+
+## Results (V)
+All checks ran on a candidate tree (`c222632` + exactly the committed changes) in the scratchpad.
+
+**Lockfile and install:**
+- `npm install --package-lock-only` reports the lock in sync. Its only addition was `hasInstallScript`, which was adopted; a second pass changed nothing.
+- `npm ci` installed 688 packages (expo 57.0.26, expo-modules-autolinking 57.0.13, ORT 1.24.3, patch-package 8.0.1), and the `postinstall` applied the patch to the pristine package.
+- patch-package 8.0.1 also applies a CRLF copy of the patch to the npm-packed `build.gradle`. This covers a fresh Windows checkout with `core.autocrlf=true`.
+
+**Autolinking:** `expo-modules-autolinking react-native-config --platform android` lists `onnxruntime-react-native` with `OnnxruntimePackage`. In the control without `react-native.config.js`, it is not listed.
+
+**Tests and JS bundle:**
+- `npm test` with `PRISM_REQUIRE_DATASET=1`: harness passed; 446 / 112 / 254 checks passed, 0 failed.
+- `expo export --platform android` exits 0: a 4 MB `.hbc` that contains the ORT binding and no `PRISM-CONFORMANCE` or `onnxruntime-node`.
+
+**Native build:**
+- `expo prebuild --platform android --no-install` was run with `app.json` as in HEAD, i.e. without the ORT config plugin.
+- `gradlew :app:generateAutolinkingPackageList :app:dependencies` (JDK 17) → BUILD SUCCESSFUL.
+  - `PackageList.java` contains `new ai.onnxruntime.reactnative.OnnxruntimePackage()`.
+  - `project :onnxruntime-react-native` is on `debugRuntimeClasspath`.
+  - The patched `build.gradle` configures under Gradle 9.
+- `gradlew :app:assembleDebug` (arm64-v8a): did not complete in the candidate. Three unrelated CMake modules (`react-native-gesture-handler`, `react-native-screens`, `expo-modules-core`) failed on the Windows 260-character path limit, because the candidate lives in the long scratchpad path. A `subst` drive did not help: Gradle resolves it back to the long path. Before those failures, `:onnxruntime-react-native:compileDebugJavaWithJavac` and `configureCMakeDebug[arm64-v8a]` succeeded.
+  - The real project (`android/`, short path, working-tree dependency set with expo 57.0.27): `gradlew :app:assembleDebug` → BUILD SUCCESSFUL (up to date). Its APK contains `lib/arm64-v8a/libonnxruntime.so` and `libonnxruntimejsi.so`.
+
+**Not verified (U):** a full APK link and a device run with the committed dependency set (expo 57.0.26). Entry 4's device evidence is for the working-tree set (expo 57.0.27).
+
+## Open issues / next step
+- The remaining uncommitted changes (Expo bump plus lock, `expo-asset`/`expo-file-system`, `app.json`) belong to the user. Commit them together so that `package.json` and `package-lock.json` stay consistent.
+  - The working-tree lock lacks `hasInstallScript`; npm adds it on the next install.
+- Entry 4 issues 3, 4, 5 and 8 are still open:
+  - native ORT is not pinned (`latest.integration`);
+  - the deprecated `CatalystInstance` shim;
+  - remove the override and the patch once an ORT release contains #28266;
+  - iOS was not verified.
