@@ -42,9 +42,13 @@ export default function DeviceScreen() {
       const { deviceId: id, deviceName: name, batteryLevel: battery } =
         await bleService.connectToDevice();
 
-      // Save to Firestore and AsyncStorage
-      await deviceService.saveDevice(userId, { deviceId: id, name });
+      // Remember the device on this phone (AsyncStorage). Register it in Firestore in the
+      // background: Firestore confirms writes only when online, so the UI does not wait for it.
       await storageService.saveLastDevice({ deviceId: id, deviceName: name });
+      if (userId) {
+        deviceService.saveDevice(userId, { deviceId: id, name })
+          .catch((err) => console.warn("[DeviceScreen] Device not registered in Firestore:", err?.message ?? err));
+      }
 
       // Update context
       setDeviceConnected({ deviceId: id, deviceName: name, batteryLevel: battery });
@@ -71,7 +75,11 @@ export default function DeviceScreen() {
       }
 
       await bleService.disconnectDevice();
-      if (deviceId) await deviceService.markDeviceInactive(userId, deviceId);
+      if (deviceId && userId) {
+        // Background Firestore update (not awaited, see handleConnect)
+        deviceService.markDeviceInactive(userId, deviceId)
+          .catch((err) => console.warn("[DeviceScreen] Device state not updated in Firestore:", err?.message ?? err));
+      }
 
       setDeviceDisconnected();
     } catch (e) {

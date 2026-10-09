@@ -195,3 +195,180 @@ See the three fix commits above (`git show --stat`). Tooling added: `tools/pipel
 
 ## Tests
 `npm test` → pass (446 checks, 0 skipped). Full 361 parity as above.
+
+---
+
+# Entry 5 — 2026-10-10: Offline-first session storage, Firestore sync and UI on the canonical session record
+
+## Objective
+Implement the fixes from the read-only audit earlier in this session (reported in chat, not logged separately). That audit found:
+- the app was online-first: start-up, saving and listing sessions all waited for Firebase;
+- no local session store, no queue, no retry, and random Firestore document IDs;
+- the UI read legacy fields (so it showed "—"/0) and still showed forbidden values.
+
+Constraints (user brief):
+- no change to the pipeline, model, baseline, `assets/ml/`, the contract or the ONNX Runtime Android fix;
+- no SQLite;
+- the session schema is kept;
+- no clinical, quality or technique output;
+- no scores, z, RMS, confidence, thresholds, GOOD/POOR, technique issues or dose counter on screen;
+- nothing committed or pushed.
+
+Evidence labels: **V** = verified by running in this session, **R** = read in code, **U** = not verified.
+
+## What was changed
+**Storage and sync (new):**
+- `services/localSessionStore.js`: AsyncStorage-shaped storage (injected), one key per session, `@PRISM:session:<session_id>`.
+  - Each key holds an envelope `{format: "prism-local-session-v1", saved_at, record, sync}`.
+  - `record` is the `buildSessionRecord()` output, stored verbatim. `sync` (`pending`/`synced`, attempts, last_error, synced_at, synced_user_id) is kept outside the record.
+  - Writes are serialized. Identical re-saves are no-ops; a different record under an existing ID is refused.
+  - Corrupt or foreign entries are skipped and reported, never overwritten or deleted.
+  - A synced entry is never downgraded by a late failure.
+- `services/syncService.js`:
+  - `saveSession(record)` stores the session locally, then requests a sync without waiting for it.
+  - Sync is single-flight: a request during a pass schedules one more pass.
+  - A session is marked synced only when the upload promise resolves (server confirmation). Failures and timeouts stay pending with `last_error`.
+  - A pass waits up to 20 s per upload, then stops (probably offline). The write Firestore still holds is not re-sent while it is held. If it is confirmed later, the session is marked synced and the next pass starts.
+  - After a rejected write, an optional server read (`sessionExistsRemotely`, `getDocFromServer`) confirms a document that an earlier unconfirmed attempt committed. This covers security rules that refuse overwrites.
+  - `mergeSessionLists(local, remote)` merges by `session_id` (legacy documents by document ID). The phone's copy wins.
+  - Exports `withTimeout`.
+- `services/appServices.js`: the app instances (AsyncStorage + Firestore + `ensureSignedIn`). The Node tests build their own instances with fakes.
+
+**Firebase:**
+- `services/sessionService.addSession` now uses `setDoc(doc(users/{uid}/sessions, session_id), {...record, timestamp: serverTimestamp()})` instead of `addDoc`. The signature is kept; it returns the session_id.
+- New `sessionExistsRemotely()`. `getSessions()` is unchanged.
+- `services/authService.js`:
+  - the `users/{uid}` profile write is no longer awaited (Firestore resolves writes only after server confirmation);
+  - new `ensureSignedIn()` (single-flight, returns `null` instead of throwing) and `isFirebaseConfigured()`;
+  - `signInAnonymously()` is kept.
+- `firebase/firebaseConfig.js`: placeholder credentials (`YOUR_…`/empty) or a Firebase init exception leave `db`/`auth` null, with `firebaseInitError` set. The app then runs locally with cloud sync off. A missing `config.js` still fails the build (static import).
+
+**Start-up and context:**
+- `App.js`:
+  - loads local sessions, then renders the navigator;
+  - requests a sync, then runs in the background: `ensureSignedIn()` → `initUser` → remote history merge → device auto-reconnect;
+  - the fatal "Configuration Error" screen was removed.
+- `context/AppContext.js`:
+  - `loadSessions(uid?)` reads local first, then (with a UID) merges `getSessions()` with a 20 s timeout. It never throws.
+  - `addNewSession(record)` saves locally through the sync service and returns the session_id. It no longer needs a `userId` or waits for Firestore.
+  - New context values: `syncStatus`, `syncNow`, `requestSync`, `localStoreError`. Existing exports are kept.
+  - Subscribes to sync status (it picks up a UID obtained by a later pass). AppState `active` triggers a sync.
+- `screens/DeviceScreen.js`: the Firestore device writes (`saveDevice`, `markDeviceInactive`) are no longer awaited and are skipped without a user (audit defect 7). The AsyncStorage last-device save is still awaited.
+
+**UI:**
+- New `utils/sessionView.js`, a whitelist view model:
+  - `describeSession()` returns status label and description, source, simulated/legacy, saved/recorded time, sync state (with last error), counts (recordings, events, not scoreable), events (number, start/end, duration, Scoreable/Not scoreable, reasons as measurement conditions with the contract's 0.5 s / 0.2 s / boundary rules), and input/processing errors;
+  - `describeSyncStatus()` produces the Dashboard sync line.
+- `ResultBadge` shows the session states, plus LEGACY. GOOD/POOR/ABNORMAL/MISSED_DOSE were removed.
+- `StatusTag`: new WAV source and Synced / Not synced tags.
+- `SessionCard`, `SessionDetailScreen` and `DashboardScreen` render through `describeSession`.
+- Removed from the screens:
+  - Mean Z-Score;
+  - mean/max score and per-event anomaly score;
+  - model confidence %;
+  - the `deviationColor` thresholds;
+  - the IssueList import;
+  - "Today's Doses 0/4".
+- Dashboard:
+  - "Cloud Sync" card with the status line and a **Sync now** button;
+  - "Last Session" card;
+  - button renamed "Run Simulated Session", with a hint saying it is real on-device analysis of synthetic audio (no "mock").
+- `utils/formatters.js`: removed `formatCompositeLabel`, `formatDeviationFlag`, `deriveIssues` and `getTodayCompletedCount`; added `formatTime`.
+- `screens/SettingsScreen.js`: removed the "Personalization" placeholders ("Daily Dose Target 4 doses", "Inhalation Duration Goal 5 seconds", "Minimum Quality Score 70%": invented thresholds and a quality %). The account text now says sessions are stored on the phone. The UID shows "Not signed in (offline or Firebase not configured)" instead of "Loading…".
+- `screens/HistoryScreen.js`: empty-state text names the new button.
+- `services/sessionRecord.js`: added `isValidSessionId()`, the Firestore document-ID rules.
+
+## Results
+**V, tests:** `npm test`:
+- `test_harness`: ALL REGRESSION TESTS PASSED;
+- `test_contract`: 446 passed, 0 failed, 0 skipped;
+- `services/test_sessions.js`: 112 passed, 0 failed, 0 skipped;
+- `utils/test_session_view.js`: 254 passed, 0 failed.
+
+The same 446 passed during the audit, before any edit.
+
+**V, mutation check** (scratch copy, `scratchpad/mutate.py`): each injected defect made a suite fail; 15 of 15 caught.
+
+| Area | Injected defects |
+|---|---|
+| Sync | mark synced before confirmation; no single-flight; failure marked synced; `saveSession` awaits the upload |
+| Firestore and auth | random document ID; profile write awaited |
+| Local store | overwrites corrupt data; list throws on a corrupt entry |
+| Merge | remote duplicates kept |
+| View model | anomaly score leaked into the view; raw reason codes; NO_INHALATION shown as an error |
+| UI | "Model confidence" label; GOOD badge; ProgressBar import |
+
+Two weak tests were tightened during this check:
+- the save-must-not-wait test now uses a 60 s confirmation timeout;
+- the auth test no longer hangs after a failure.
+
+**V, Metro production bundle:** `CI=1 npx expo export --platform android --output-dir <scratchpad>/export_entry5` exits 0 and produces one 4 MB `.hbc`.
+- Present in the bundle: `@PRISM:session:`, "Run Simulated Session", "Not synced yet", "No inhalation detected", "Sync now".
+- Absent: "Mean Z-Score", "Today's Doses", "Model Confidence", "Missed Dose", "Minimum Quality Score", "mock inhalation", "onnxruntime-node", "PRISM-CONFORMANCE".
+
+**V, integrity:**
+- `git diff -- pipeline assets` is empty;
+- the ORT gradle patch is still applied;
+- `react-native.config.js` is unchanged;
+- `AsyncStoragePackage` is in the generated `PackageList.java`, so no native rebuild is needed for this change.
+
+**What the tests cover (V, Node with fakes):**
+- local round trip of all 9 golden-derived records plus a PROCESSING_ERROR record;
+- restart persistence;
+- `saveSession` returns within 1 s while Firestore never confirms (60 s timeout);
+- the held write is not re-sent;
+- late confirmation → synced, and the queue continues;
+- app closed mid-sync → retry after restart, exactly one remote document;
+- failure → pending with error → retry → synced, same document ID;
+- lost confirmation (commit-then-reject, commit-then-hang) → one document, plus server-read confirmation under create-only rules;
+- 5 concurrent `syncNow` calls share one run; uploads never overlap; a session saved mid-pass is uploaded;
+- merge without duplicates (local wins, remote-only kept, legacy flagged);
+- 6 kinds of corrupt entries skipped and left intact, and other features' keys ignored;
+- unreadable store → status `error`, no throw;
+- not signed in → nothing uploaded;
+- `sessionService` (fake `firebase/*` via `node:module` `registerHooks`):
+  - every write, retries included, is `setDoc` on `users/{uid}/sessions/{session_id}`, and the document equals the record plus the server timestamp;
+  - `getSessions` flags legacy documents and hides `in_progress` ones;
+- `authService`: sign-in resolves while the profile write never confirms; failures → `null`; concurrent calls share one attempt.
+
+**What the view tests cover (V):**
+- every golden case: status, counts, exact event times, reason texts, input-error text;
+- no forbidden key, no internal numeric value (anomaly_score, z, feature values, mean_rms, confidences, diagnostics) and no forbidden wording anywhere in the view;
+- NO_INHALATION, NOT_SCOREABLE, INPUT_ERROR and PROCESSING_ERROR are kept apart;
+- simulated, legacy (GOOD/POOR and camelCase documents not interpreted) and sync flags;
+- static scan of all UI modules reachable from `App.js` (7 files) for forbidden fields, labels and helpers.
+
+## Not verified
+- **U, on the phone:** the JS was not loaded onto the phone. The phone was online this time (Wi-Fi and DNS work), so a device run would have written test sessions to the user's Firestore. Offline checks would have needed airplane mode on the user's phone. Both need the user's go-ahead.
+- **U, Firestore rules:** the security rules are not in the repository. Retries need either update permission on `users/{uid}/sessions/{id}` or read permission (for the server check). Without either, a session whose confirmation was lost stays pending; it never duplicates.
+- **U, rendering:** components were not rendered (no React Native renderer in Node). The UI checks are the view model plus the static scan.
+
+## Files changed
+- **New:** `services/localSessionStore.js`, `services/syncService.js`, `services/appServices.js`, `services/test_sessions.js`, `utils/sessionView.js`, `utils/test_session_view.js`.
+- **Modified:** `App.js`, `context/AppContext.js`, `services/authService.js`, `services/sessionService.js`, `services/sessionRecord.js` (an addition only), `firebase/firebaseConfig.js`, `screens/DashboardScreen.js`, `screens/SessionDetailScreen.js`, `screens/DeviceScreen.js`, `screens/HistoryScreen.js`, `screens/SettingsScreen.js`, `components/ResultBadge.js`, `components/SessionCard.js`, `components/StatusTag.js`, `utils/formatters.js`, `package.json` (the test script only), and this log.
+- **Not deleted:** `components/IssueList.js` and `components/ProgressBar.js` are no longer imported or reachable. Deleting them was refused by the session's permission check, so they remain.
+  - `IssueList.js` imports `deriveIssues`, which no longer exists, so it would fail if imported again. Deleting both is recommended.
+- Nothing was committed or pushed.
+
+## Tests
+`npm test`: exit 0; the four suites as listed under Results.
+
+## Open issues / next step
+1. **Device check (needs the user's OK, debug build plus Metro, no native rebuild):**
+   1. In airplane mode, launch: the Dashboard appears with no error screen.
+   2. Run Simulated Session: the session is listed as "Not synced".
+   3. Force-stop and relaunch: the session is still listed.
+   4. Network on, then foreground or Sync now: "Synced", and the Firestore console shows exactly one `users/{uid}/sessions/{session_id}` document.
+   5. Kill the app during a sync and relaunch: still one document.
+   6. Existing legacy documents show as "Legacy record".
+   7. A build with placeholder credentials runs locally with sync off.
+2. **Firestore rules:** confirm update (or read) permission on the session documents. Record the rules in the repository.
+3. **Storage growth:** sessions measured 2.4 KB median and 5.6 KB max; AsyncStorage on Android allows 6 MB by default (≈1,500–2,000 sessions). No pruning is implemented. Options: a policy that prunes synced sessions, or raising `AsyncStorage_db_size_in_MB`.
+4. **Remote-only history** (sessions written by earlier app versions or another install) is not cached locally, so it is visible only when Firestore is reachable.
+5. **Behaviour notes:**
+   - A retry rewrites the server `timestamp`, which becomes the time of the last confirmed write.
+   - With a first launch offline, sessions are uploaded under the anonymous UID created at the first successful sign-in.
+   - Clearing app data removes the local sessions and the anonymous UID together.
+6. **No network-change listener** (NetInfo was not added). Sync runs at start-up, after each save, on foreground, on Sync now, and after a late confirmation.
+7. **Session IDs:** `session_id` = `sim_sess_<ms>` is unique per device. A future BLE source must produce IDs that pass `isValidSessionId()`.
+8. **README** still describes the old app; `IssueList.js` and `ProgressBar.js` should be deleted (see Files changed).

@@ -63,16 +63,6 @@ export default function SettingsScreen() {
         />
       </View>
 
-      {/* Personalization — placeholder */}
-      <SectionHeader title="Personalization" icon="person-outline" />
-      <View style={[styles.card, SHADOW.card]}>
-        <PlaceholderRow label="Daily Dose Target" value="4 doses" />
-        <View style={styles.divider} />
-        <PlaceholderRow label="Inhalation Duration Goal" value="5 seconds" />
-        <View style={styles.divider} />
-        <PlaceholderRow label="Minimum Quality Score" value="70%" />
-      </View>
-
       {/* Account */}
       <SectionHeader title="Account" icon="shield-checkmark-outline" />
       <View style={[styles.card, SHADOW.card]}>
@@ -80,7 +70,7 @@ export default function SettingsScreen() {
           <View>
             <Text style={styles.accountLabel}>Anonymous User ID</Text>
             <Text style={styles.accountId} numberOfLines={1} ellipsizeMode="middle">
-              {userId || "Loading…"}
+              {userId || "Not signed in (offline or Firebase not configured)"}
             </Text>
           </View>
           <View style={styles.anonBadge}>
@@ -88,8 +78,9 @@ export default function SettingsScreen() {
           </View>
         </View>
         <Text style={styles.accountNote}>
-          Your data is stored privately using Firebase Anonymous Authentication. 
-          Account linking will be available in a future update.
+          Sessions are stored on this phone and work offline. When Firebase is reachable they
+          are copied to your anonymous Firebase account. Account linking will be available in a
+          future update.
         </Text>
       </View>
 

@@ -66,3 +66,13 @@ export function assertFirestoreSafe(value, path = "session") {
 export function isLegacyRecord(doc) {
   return doc?.schema !== SESSION_RECORD_SCHEMA;
 }
+
+/**
+ * True when `id` can serve as both the local storage key suffix and the Firestore document ID of
+ * a session (Firestore forbids "/", "." and "..", and IDs of the form __x__; this is stricter).
+ * @param {*} id
+ */
+export function isValidSessionId(id) {
+  return typeof id === "string" && /^[A-Za-z0-9_.:-]{1,200}$/.test(id)
+    && id !== "." && id !== ".." && !/^__.*__$/.test(id);
+}

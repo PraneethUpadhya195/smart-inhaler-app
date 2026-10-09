@@ -1,30 +1,19 @@
 import React from "react";
 import { View, Text, StyleSheet, ScrollView } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { useAppContext } from "../context/AppContext";
 import ResultBadge from "../components/ResultBadge";
-import IssueList from "../components/IssueList";
 import StatusTag from "../components/StatusTag";
 import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
-import {
-  formatTimestamp,
-  formatDuration,
-  formatMs,
-  formatDeviationFlag,
-} from "../utils/formatters";
+import { formatTimestamp, formatTime } from "../utils/formatters";
+import { describeSession } from "../utils/sessionView";
 
 export default function SessionDetailScreen({ route }) {
-  const { session } = route.params;
-  const {
-    timestamp,
-    status,
-    nEvents,
-    nScored,
-    aggregateScores,
-    events,
-    errors,
-    source,
-    deviceId
-  } = session;
+  const { sessions } = useAppContext();
+  // The list entry is looked up again so the sync state stays current while the screen is open.
+  const passed = route.params.session;
+  const session = sessions.find((s) => s.id === passed.id) ?? passed;
+  const view = describeSession(session);
 
   return (
     <ScrollView
@@ -32,104 +21,93 @@ export default function SessionDetailScreen({ route }) {
       contentContainerStyle={styles.content}
       showsVerticalScrollIndicator={false}
     >
-      {/* Errors warning banner */}
-      {errors && errors.length > 0 && (
-        <View style={styles.warningBanner}>
-          <Text style={styles.warningIcon}>⚠️</Text>
-          <Text style={styles.warningText}>
-            This session contained recording errors: {errors.map(e => e.error).join(', ')}
-          </Text>
+      {/* Simulated / legacy notes */}
+      {view.simulated && (
+        <Banner
+          icon="flask-outline"
+          color={COLORS.tagSim}
+          text={view.note ?? "Simulated session: synthetic test audio, not a recording."}
+        />
+      )}
+      {view.legacy && <Banner icon="archive-outline" color={COLORS.textSecondary} text={view.status.description} />}
+
+      {/* Input / processing errors */}
+      {view.problems.length > 0 && (
+        <Banner
+          icon="alert-circle-outline"
+          color={COLORS.warning}
+          text={view.problems.map((p) => p.text).join("\n")}
+        />
+      )}
+
+      {/* Status + metadata */}
+      <View style={[styles.card, SHADOW.card]}>
+        <Row label="Status">
+          <ResultBadge label={view.status.key} />
+        </Row>
+        {!view.legacy && <Text style={styles.description}>{view.status.description}</Text>}
+        <Row label="Source">
+          <Text style={styles.value}>{view.sourceLabel}</Text>
+        </Row>
+        <Row label="Saved">
+          <Text style={styles.value}>{formatTimestamp(view.savedAt)}</Text>
+        </Row>
+        {view.recordedAt && (
+          <Row label="Recorded">
+            <Text style={styles.value}>{formatTimestamp(view.recordedAt)}</Text>
+          </Row>
+        )}
+        <Row label="Cloud sync">
+          <StatusTag type="sync" value={view.sync.state} />
+        </Row>
+        {view.sync.detail && <Text style={styles.small}>Last attempt: {view.sync.detail}</Text>}
+      </View>
+
+      {/* Counts */}
+      {view.counts && (
+        <View style={[styles.card, SHADOW.card]}>
+          <Text style={styles.sectionTitle}>Summary</Text>
+          <View style={styles.metricsGrid}>
+            <MetricBox label="Recordings" value={view.counts.recordings} />
+            <MetricBox label="Events" value={view.counts.events} />
+            <MetricBox label="Not scoreable" value={view.counts.notScoreable} />
+          </View>
         </View>
       )}
 
-      {/* Result + tags */}
-      <View style={[styles.card, SHADOW.card]}>
-        <Row label="Result">
-          <ResultBadge label={status} />
-        </Row>
-        <Row label="Source">
-          <StatusTag type="source" value={source} />
-        </Row>
-        <Row label="Timestamp">
-          <Text style={styles.value}>{formatTimestamp(timestamp)}</Text>
-        </Row>
-      </View>
-
-      {/* Aggregate Assessment */}
-      <View style={[styles.card, SHADOW.card]}>
-        <Text style={styles.sectionTitle}>Session Aggregates</Text>
-        <View style={styles.metricsGrid}>
-          <MetricBox
-            label="Total Events"
-            value={nEvents || 0}
-          />
-          <MetricBox
-            label="Scored"
-            value={nScored || 0}
-          />
-        </View>
-        {aggregateScores && (
-          <View style={styles.metricsGrid}>
-            <MetricBox
-              label="Mean Score"
-              value={aggregateScores.mean.toFixed(2)}
-              color={COLORS.primary}
-            />
-            <MetricBox
-              label="Max Score"
-              value={aggregateScores.max.toFixed(2)}
-            />
-          </View>
-        )}
-      </View>
-
       {/* Individual Events */}
-      {events && events.length > 0 && (
+      {view.events.length > 0 && (
         <View style={[styles.card, SHADOW.card]}>
           <Text style={styles.sectionTitle}>Detected Events</Text>
-          {events.map((ev, idx) => (
-            <View key={idx} style={{ marginBottom: SPACING.md, paddingBottom: SPACING.sm, borderBottomWidth: 1, borderColor: COLORS.border }}>
-              <Text style={{ fontWeight: '700', marginBottom: SPACING.xs }}>Event {ev.eventId} ({ev.status})</Text>
-              
+          {view.events.map((ev) => (
+            <View key={ev.key} style={styles.event}>
+              <Text style={styles.eventTitle}>
+                Event {ev.number}
+                {ev.recordingNumber ? ` · recording ${ev.recordingNumber}` : ""} · {ev.statusLabel}
+              </Text>
               <DetailRow
                 icon="time-outline"
-                label="Timeline"
-                value={`${formatDuration(ev.startTime)} to ${formatDuration(ev.endTime)}`}
+                label="Time in recording"
+                value={`${formatTime(ev.startTime)} – ${formatTime(ev.endTime)}`}
               />
               <DetailRow
                 icon="resize-outline"
                 label="Duration"
-                value={formatDuration(ev.durationS)}
+                value={formatTime(ev.durationS)}
               />
-              <DetailRow
-                icon="analytics-outline"
-                label="Model Confidence"
-                value={`${Math.round(ev.detectorConfidence * 100)}%`}
-              />
-              
-              {ev.status === 'SCORE_ONLY' && (
-                <DetailRow
-                  icon="stats-chart-outline"
-                  label="Anomaly Score"
-                  value={ev.anomalyScore?.toFixed(3)}
-                  valueColor={COLORS.primary}
-                />
-              )}
-              {ev.status === 'NOT_SCOREABLE' && ev.notScoreableReasons && (
-                <View style={{ marginTop: SPACING.xs }}>
-                  <Text style={{ fontSize: 12, color: COLORS.danger }}>Excluded: {ev.notScoreableReasons.join(', ')}</Text>
-                </View>
-              )}
+              {ev.reasons.map((reason) => (
+                <Text key={reason} style={styles.reason}>• {reason}</Text>
+              ))}
             </View>
           ))}
         </View>
       )}
 
       {/* Device info */}
-      {deviceId && (
+      {view.deviceId && (
         <View style={[styles.card, SHADOW.card]}>
           <Text style={styles.sectionTitle}>Device</Text>
-          <Text style={styles.deviceId}>{deviceId}</Text>
+          <Text style={styles.deviceId}>{view.deviceId}</Text>
         </View>
       )}
     </ScrollView>
@@ -137,6 +115,15 @@ export default function SessionDetailScreen({ route }) {
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
+
+function Banner({ icon, color, text }) {
+  return (
+    <View style={[styles.banner, { backgroundColor: color + "18", borderColor: color + "50" }]}>
+      <Ionicons name={icon} size={18} color={color} />
+      <Text style={[styles.bannerText, { color }]}>{text}</Text>
+    </View>
+  );
+}
 
 function Row({ label, children }) {
   return (
@@ -147,41 +134,25 @@ function Row({ label, children }) {
   );
 }
 
-function MetricBox({ label, value, color, small }) {
+function MetricBox({ label, value }) {
   return (
     <View style={styles.metricBox}>
-      <Text
-        style={[
-          small ? styles.metricValueSmall : styles.metricValue,
-          color && { color },
-        ]}
-        numberOfLines={1}
-        adjustsFontSizeToFit
-      >
-        {value}
+      <Text style={styles.metricValue} numberOfLines={1} adjustsFontSizeToFit>
+        {value ?? "—"}
       </Text>
       <Text style={styles.metricLabel}>{label}</Text>
     </View>
   );
 }
 
-function DetailRow({ icon, label, value, valueColor }) {
+function DetailRow({ icon, label, value }) {
   return (
     <View style={styles.detailRow}>
       <Ionicons name={icon} size={16} color={COLORS.textMuted} style={styles.detailIcon} />
       <Text style={styles.detailLabel}>{label}</Text>
-      <Text style={[styles.detailValue, valueColor && { color: valueColor }]}>{value}</Text>
+      <Text style={styles.detailValue}>{value}</Text>
     </View>
   );
-}
-
-// ─── Color helpers ────────────────────────────────────────────────────────────
-
-function deviationColor(score) {
-  if (score == null) return COLORS.textMuted;
-  if (score < 1.5) return COLORS.success;
-  if (score < 3.0) return COLORS.warning;
-  return COLORS.danger;
 }
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
@@ -190,18 +161,15 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.background },
   content: { padding: SPACING.md, paddingBottom: SPACING.xl, gap: SPACING.md },
 
-  warningBanner: {
+  banner: {
     flexDirection: "row",
     alignItems: "flex-start",
     gap: SPACING.sm,
-    backgroundColor: COLORS.warning + "18",
     borderRadius: RADIUS.md,
     borderWidth: 1,
-    borderColor: COLORS.warning + "50",
     padding: SPACING.md,
   },
-  warningIcon: { fontSize: 18 },
-  warningText: { flex: 1, color: COLORS.warning, fontSize: 13, lineHeight: 20 },
+  bannerText: { flex: 1, fontSize: 13, lineHeight: 20 },
 
   card: {
     backgroundColor: COLORS.surface,
@@ -219,6 +187,8 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     marginBottom: SPACING.xs,
   },
+  description: { color: COLORS.textSecondary, fontSize: 13, lineHeight: 19 },
+  small: { color: COLORS.textMuted, fontSize: 12 },
 
   row: {
     flexDirection: "row",
@@ -229,8 +199,7 @@ const styles = StyleSheet.create({
     borderBottomColor: COLORS.border,
   },
   rowLabel: { color: COLORS.textSecondary, fontSize: 14 },
-  value: { color: COLORS.text, fontSize: 14, fontWeight: "500" },
-  valueMono: { color: COLORS.textSecondary, fontSize: 12, fontFamily: "monospace" },
+  value: { color: COLORS.text, fontSize: 14, fontWeight: "500", flexShrink: 1, textAlign: "right" },
 
   metricsGrid: {
     flexDirection: "row",
@@ -245,8 +214,16 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   metricValue: { fontSize: 28, fontWeight: "700", color: COLORS.text },
-  metricValueSmall: { fontSize: 16, fontWeight: "700", color: COLORS.text },
   metricLabel: { fontSize: 12, color: COLORS.textMuted },
+
+  event: {
+    marginBottom: SPACING.md,
+    paddingBottom: SPACING.sm,
+    borderBottomWidth: 1,
+    borderColor: COLORS.border,
+  },
+  eventTitle: { fontWeight: "700", color: COLORS.text, marginBottom: SPACING.xs },
+  reason: { fontSize: 12, color: COLORS.textSecondary, marginTop: SPACING.xs },
 
   detailRow: {
     flexDirection: "row",

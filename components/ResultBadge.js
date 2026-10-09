@@ -1,13 +1,14 @@
 import React from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { COLORS, RADIUS, SPACING } from "../utils/theme";
+import { SESSION_STATUS_TEXT, LEGACY_STATUS } from "../utils/sessionView";
 
 /**
- * ResultBadge — color-coded pill for PRISM composite quality labels.
+ * ResultBadge — pill showing a session's status: one of the session states derived from the
+ * contract's recording and event states (pipeline/SessionAggregator), or "LEGACY".
+ * It shows states only; there is no quality, technique or clinical label.
  *
- * Labels: GOOD | POOR | GOOD_BUT_INCONSISTENT | ABNORMAL | MISSED_DOSE
- *
- * @param {{ label: string, size?: "sm" | "md" }} props
+ * @param {{ label: string, size?: "sm" | "md" }} props — label: session_status (or "LEGACY")
  */
 export default function ResultBadge({ label, size = "md" }) {
   const config = LABEL_CONFIG[label] || LABEL_CONFIG.default;
@@ -35,12 +36,14 @@ export default function ResultBadge({ label, size = "md" }) {
   );
 }
 
+// Neutral colours for detection states; warning/danger only for technical errors.
 const LABEL_CONFIG = {
-  GOOD: { display: "Good", color: COLORS.success },
-  POOR: { display: "Poor", color: COLORS.danger },
-  GOOD_BUT_INCONSISTENT: { display: "Inconsistent", color: COLORS.warning },
-  ABNORMAL: { display: "Abnormal", color: COLORS.info },
-  MISSED_DOSE: { display: "Missed Dose", color: COLORS.danger },
+  SCORE_ONLY: { display: SESSION_STATUS_TEXT.SCORE_ONLY.label, color: COLORS.primary },
+  NOT_SCOREABLE: { display: SESSION_STATUS_TEXT.NOT_SCOREABLE.label, color: COLORS.info },
+  NO_INHALATION_DETECTED: { display: SESSION_STATUS_TEXT.NO_INHALATION_DETECTED.label, color: COLORS.textSecondary },
+  INPUT_ERROR: { display: SESSION_STATUS_TEXT.INPUT_ERROR.label, color: COLORS.warning },
+  PROCESSING_ERROR: { display: SESSION_STATUS_TEXT.PROCESSING_ERROR.label, color: COLORS.danger },
+  LEGACY: { display: LEGACY_STATUS.label, color: COLORS.textMuted },
   default: { display: "—", color: COLORS.textMuted },
 };
 

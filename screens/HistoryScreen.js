@@ -27,7 +27,7 @@ export default function HistoryScreen({ navigation }) {
       <View style={styles.centered}>
         <Text style={styles.emptyIcon}>💨</Text>
         <Text style={styles.emptyTitle}>No sessions yet</Text>
-        <Text style={styles.emptySubtitle}>Go to Dashboard and tap "Simulate Inhalation"</Text>
+        <Text style={styles.emptySubtitle}>Go to Dashboard and tap "Run Simulated Session"</Text>
       </View>
     );
   }

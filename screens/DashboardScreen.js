@@ -13,25 +13,27 @@ import { useAppContext } from "../context/AppContext";
 import { runSimulatedSession } from "../services/simulationService";
 import { getPipeline } from "../services/inferenceService";
 import ResultBadge from "../components/ResultBadge";
-import ProgressBar from "../components/ProgressBar";
 import StatusTag from "../components/StatusTag";
 import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
-import { formatDuration, formatMs, getTodayCompletedCount } from "../utils/formatters";
+import { formatTimestamp } from "../utils/formatters";
+import { describeSession, describeSyncStatus } from "../utils/sessionView";
 
 export default function DashboardScreen() {
-  const { sessions, addNewSession, deviceStatus } = useAppContext();
+  const { sessions, addNewSession, deviceStatus, syncStatus, syncNow, localStoreError } = useAppContext();
   const [isSimulating, setIsSimulating] = useState(false);
 
   const lastSession = sessions[0] || null;
-  const todayCount = getTodayCompletedCount(sessions);
+  const pendingCount = sessions.filter((s) => s.sync?.state === "pending").length;
 
   async function handleSimulate() {
     setIsSimulating(true);
     try {
+      // The real on-device pipeline on synthetic test audio. The session is stored on this
+      // phone at once; the upload to Firestore runs in the background.
       const session = await runSimulatedSession(getPipeline);
       await addNewSession(session);
     } catch (e) {
-      Alert.alert("Error", "Failed to save session. Check your Firebase config.");
+      Alert.alert("Session not saved", `The session could not be stored on this phone: ${e?.message ?? e}`);
       console.error(e);
     } finally {
       setIsSimulating(false);
@@ -62,25 +64,41 @@ export default function DashboardScreen() {
         </Text>
       </View>
 
-      {/* Dose Progress Card */}
+      {/* Cloud sync card */}
       <View style={[styles.card, SHADOW.card]}>
-        <Text style={styles.cardTitle}>Today's Doses</Text>
-        <ProgressBar completed={todayCount} />
+        <Text style={styles.cardTitle}>Cloud Sync</Text>
+        <Text style={styles.syncText}>{describeSyncStatus(syncStatus, pendingCount)}</Text>
+        {localStoreError && <Text style={styles.errorText}>{localStoreError}</Text>}
+        <TouchableOpacity
+          style={[styles.syncBtn, syncStatus.running && styles.btnDisabled]}
+          onPress={() => syncNow()}
+          disabled={syncStatus.running}
+          activeOpacity={0.8}
+        >
+          {syncStatus.running ? (
+            <ActivityIndicator color={COLORS.primary} />
+          ) : (
+            <>
+              <Ionicons name="cloud-upload-outline" size={18} color={COLORS.primary} />
+              <Text style={styles.syncBtnText}>Sync now</Text>
+            </>
+          )}
+        </TouchableOpacity>
       </View>
 
       {/* Last Session Card */}
       <View style={[styles.card, SHADOW.card]}>
-        <Text style={styles.cardTitle}>Last Inhalation</Text>
+        <Text style={styles.cardTitle}>Last Session</Text>
         {lastSession ? (
           <LastSessionContent session={lastSession} />
         ) : (
-          <Text style={styles.emptyText}>No sessions yet. Simulate one below!</Text>
+          <Text style={styles.emptyText}>No sessions yet. Run a simulated session below.</Text>
         )}
       </View>
 
-      {/* Simulate Inhalation Button */}
+      {/* Simulated session button */}
       <TouchableOpacity
-        style={[styles.simulateBtn, isSimulating && styles.simulateBtnDisabled]}
+        style={[styles.simulateBtn, isSimulating && styles.btnDisabled]}
         onPress={handleSimulate}
         disabled={isSimulating}
         activeOpacity={0.8}
@@ -90,44 +108,43 @@ export default function DashboardScreen() {
         ) : (
           <>
             <Ionicons name="play-circle-outline" size={20} color="#fff" />
-            <Text style={styles.simulateBtnText}>Simulate Inhalation</Text>
+            <Text style={styles.simulateBtnText}>Run Simulated Session</Text>
           </>
         )}
       </TouchableOpacity>
 
       <Text style={styles.hint}>
-        Tap to generate a mock inhalation session and save it to Firestore
+        Runs the on-device analysis on synthetic test audio (not a recording of an inhalation).
+        The session is saved on this phone and uploaded to the cloud when a connection is available.
       </Text>
     </ScrollView>
   );
 }
 
 function LastSessionContent({ session }) {
-  const { status, nEvents, nScored, aggregateScores, errors } = session;
+  const view = describeSession(session);
 
   return (
     <View style={styles.lastSessionContent}>
-      <ResultBadge label={status} />
-      {errors && errors.length > 0 && (
-        <StatusTag type="status" value="errors_present" />
-      )}
-      <View style={styles.statsRow}>
-        <MiniStat
-          icon="pulse-outline"
-          value={nEvents || 0}
-          label="Total Events"
-        />
-        <MiniStat
-          icon="checkmark-done-outline"
-          value={nScored || 0}
-          label="Scored Events"
-        />
-        <MiniStat
-          icon="analytics-outline"
-          value={aggregateScores ? aggregateScores.mean.toFixed(2) : "—"}
-          label="Mean Z-Score"
-        />
+      <View style={styles.badgeRow}>
+        <ResultBadge label={view.status.key} />
+        <View style={styles.tagsRow}>
+          <StatusTag type="source" value={view.source} />
+          <StatusTag type="sync" value={view.sync.state} />
+        </View>
       </View>
+      <Text style={styles.timestamp}>{formatTimestamp(view.savedAt)}</Text>
+      {!view.legacy && <Text style={styles.description}>{view.status.description}</Text>}
+      {view.problems.map((p, i) => (
+        <Text key={i} style={styles.errorText}>{p.text}</Text>
+      ))}
+      {view.counts && (
+        <View style={styles.statsRow}>
+          <MiniStat icon="albums-outline" value={view.counts.recordings} label="Recordings" />
+          <MiniStat icon="pulse-outline" value={view.counts.events} label="Events" />
+          <MiniStat icon="remove-circle-outline" value={view.counts.notScoreable} label="Not scoreable" />
+        </View>
+      )}
     </View>
   );
 }
@@ -136,7 +153,7 @@ function MiniStat({ icon, value, label }) {
   return (
     <View style={styles.miniStat}>
       <Ionicons name={icon} size={18} color={COLORS.primary} />
-      <Text style={styles.miniStatValue}>{value}</Text>
+      <Text style={styles.miniStatValue}>{value ?? "—"}</Text>
       <Text style={styles.miniStatLabel}>{label}</Text>
     </View>
   );
@@ -187,6 +204,24 @@ const styles = StyleSheet.create({
   },
 
   lastSessionContent: { gap: SPACING.sm },
+  badgeRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  tagsRow: { flexDirection: "row", gap: SPACING.xs },
+  timestamp: { fontSize: 12, color: COLORS.textMuted },
+  description: { fontSize: 13, color: COLORS.textSecondary, lineHeight: 19 },
+  errorText: { fontSize: 13, color: COLORS.warning, lineHeight: 19 },
+
+  syncText: { fontSize: 14, color: COLORS.text, lineHeight: 20 },
+  syncBtn: {
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: COLORS.primary,
+    padding: SPACING.sm,
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    gap: SPACING.xs,
+  },
+  syncBtnText: { color: COLORS.primary, fontSize: 14, fontWeight: "700" },
 
   statsRow: {
     flexDirection: "row",
@@ -209,7 +244,7 @@ const styles = StyleSheet.create({
     gap: SPACING.sm,
     marginBottom: SPACING.sm,
   },
-  simulateBtnDisabled: { opacity: 0.6 },
+  btnDisabled: { opacity: 0.6 },
   simulateBtnText: { color: "#fff", fontSize: 16, fontWeight: "700" },
 
   hint: { textAlign: "center", color: COLORS.textMuted, fontSize: 12 },

@@ -3,36 +3,42 @@ import { View, Text, StyleSheet, TouchableOpacity } from "react-native";
 import { COLORS, RADIUS, SPACING, SHADOW } from "../utils/theme";
 import ResultBadge from "./ResultBadge";
 import StatusTag from "./StatusTag";
-import { formatTimestamp, formatDuration } from "../utils/formatters";
+import { formatTimestamp } from "../utils/formatters";
+import { describeSession } from "../utils/sessionView";
 
 /**
  * SessionCard — compact card for use in History list.
- * Reads from the PRISM session schema (event_classification, quality_assessment).
+ * Shows the session view of utils/sessionView.js: status, source, sync state, time and counts.
  *
  * @param {{ session: Object, onPress: Function }} props
  */
 export default function SessionCard({ session, onPress }) {
-  const { timestamp, duration, quality_assessment, source, status } = session;
-  const compositeLabel = quality_assessment?.composite_label;
+  const view = describeSession(session);
 
   return (
     <TouchableOpacity style={[styles.card, SHADOW.card]} onPress={onPress} activeOpacity={0.75}>
-      {/* Top row: result badge + tags */}
+      {/* Top row: status badge + tags */}
       <View style={styles.topRow}>
-        <ResultBadge label={compositeLabel} size="sm" />
+        <ResultBadge label={view.status.key} size="sm" />
         <View style={styles.tagsRow}>
-          <StatusTag type="source" value={source} />
-          {status === "interrupted" && <StatusTag type="status" value="interrupted" />}
+          <StatusTag type="source" value={view.source} />
+          <StatusTag type="sync" value={view.sync.state} />
         </View>
       </View>
 
       {/* Timestamp */}
-      <Text style={styles.timestamp}>{formatTimestamp(timestamp)}</Text>
+      <Text style={styles.timestamp}>{formatTimestamp(view.savedAt)}</Text>
 
       {/* Stats row */}
-      <View style={styles.statsRow}>
-        <Stat label="Duration" value={formatDuration(duration)} />
-      </View>
+      {view.counts && (
+        <View style={styles.statsRow}>
+          <Stat label="Recordings" value={view.counts.recordings} />
+          <View style={styles.divider} />
+          <Stat label="Events" value={view.counts.events} />
+          <View style={styles.divider} />
+          <Stat label="Not scoreable" value={view.counts.notScoreable} />
+        </View>
+      )}
     </TouchableOpacity>
   );
 }
@@ -40,7 +46,7 @@ export default function SessionCard({ session, onPress }) {
 function Stat({ label, value }) {
   return (
     <View style={styles.stat}>
-      <Text style={styles.statValue}>{value}</Text>
+      <Text style={styles.statValue}>{value ?? "—"}</Text>
       <Text style={styles.statLabel}>{label}</Text>
     </View>
   );
