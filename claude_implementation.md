@@ -198,6 +198,81 @@ See the three fix commits above (`git show --stat`). Tooling added: `tools/pipel
 
 ---
 
+# Entry 3 — 2026-10-08: Stage 10 (V3 personal reference) ↔ App Compatibility Audit (read-only)
+
+## Objective
+Check whether the app is compatible with research **Stage 10**. That is the V3 personal reference, `prism-personal-reference-v3.0-draft`, committed and frozen in `../PRISM smart inhaler` at `3c8f64f` (research Entry 15). This entry is an audit only.
+- **Integration is out of scope:** the research owner froze V3 and said not to integrate it into the app.
+- **No app code was changed.**
+
+## What Stage 10 requires (R, research `src/personal_reference.py`, `results/personal_reference/README.md`)
+- **Separate channel:** V3 is a personal channel next to the Stage 9 population channel (`prism-assessment-v1.0`), which stays unchanged.
+- **Inputs, per recording in time order, for one (user_id, device_id):**
+  - `recorded_at` (ISO 8601);
+  - for each event, its scoreability and the four V2 z-values in the Stage 9 coordinates.
+- **Sitting:** recordings at most 25 min apart. A sitting qualifies with ≥ 10 scoreable events.
+- **Output:** a continuous `personal_deviation`, or `POPULATION_ONLY` during `WARMUP`, plus the baseline state.
+- **State:** JSON per (user, device), with a hash-chained audit log.
+- **Status:** implemented and mechanically verified on proxy/synthetic data; NOT validated on real longitudinal user data.
+
+## Results
+Evidence labels: **V** verified in this session, **R** read, **U** unverified.
+
+**Method.**
+- The app's `InferencePipeline.run()` was run on all 361 reference WAVs: `tools/pipeline_compat/e2e_run.mjs`, 4 shards, about 130 s per shard, Node 24.11.1.
+- Its outputs were fed into the frozen research V3 code, imported unchanged, by a scratch script that is not committed. The results were compared with the research Stage 9 / Stage 10 outputs.
+
+**A. Numerically compatible.**
+
+| Check | Result | |
+|---|---|---|
+| Coordinates: app `assets/ml/v2_validation/v2_baseline.json` against the Stage 9 reference baseline | centre and scale bit-identical. The app's `feature_z_scores` are already in V3's coordinates | V |
+| App `run()` against Stage 9 deployment outputs | 361 recordings, 364 = 364 events, 0 scoreability mismatches. Over 318 scored events, max \|Δz\| = 2.3×10⁻⁶ | V |
+| App outputs replayed through V3 (frozen 9-of-10 and 8-of-10 configs, one pseudo-user, file-name timestamps) | identical to the research replay (`real_corpus_replay_events.csv`) in sitting, status and assessment. `WARMUP` throughout: 8 of 23 sittings qualify, B = 0 | V |
+| Test-only adaptive config (2 of 2, s_min 1; not a V3 config), so that the 8 real qualifying sittings can adapt: app z against Stage 9 z | 5 updates; gate decisions identical; B within 2.1×10⁻⁷; personal deviations within 8.4×10⁻⁷ (259 values) | V |
+
+**B. Gaps that block any future integration.**
+
+| ID | Gap | Evidence |
+|---|---|---|
+| G1 | **No Stage 9 population channel in the app.** The app implements inference v2 only (Entry 2, user choice). Stage 10's design relies on the frozen Stage 9 channel (`WITHIN` / `OUTSIDE_REFERENCE_RANGE`) to keep reporting deviations that the personal baseline absorbs (noise, microphone, device). V3's `observe_population_output()` rejects the app output ("not a Stage 9 assessment output"). The lower-level `observe_recording(z, scoreable, recorded_at)` accepts the app's z-values | V |
+| G2 | **No JS/React Native implementation of V3.** V3 exists only in Python | R |
+| G3 | **Audit chain and `state_id` are not reproducible in JS.** They are SHA-256 of Python `json.dumps` text, and number formatting differs: Python `[1.0,1e-07,1e+16]` against JS `[1,1e-7,10000000000000000]`. A port needs a Python-compatible canonical serialiser to verify or extend a Python-written state | V |
+| G4 | **`recorded_at` is not guaranteed.** `run()` emits `recorded_at = null` unless the source supplies it: all 361 tool outputs had `null`. `SimulatedPcmSource` uses `new Date()` (UTC `Z`).<br>V3 rejects mixing time-zone-aware and naive timestamps (V). **Research-side defect (frozen V3, not fixed):** V3 accepts `null` on the first recording of a stream, then rejects every later recording until the sitting is closed, and logs a sitting with null times. Any integration must reject `null` before calling V3 | V |
+| G5 | **Device identity.** `buildSessionRecord` defaults `device_id` to `null` (simulation, WAV). V3 requires a non-empty `device_id` (V). The `(uid, deviceId)` key maps naturally onto `users/{uid}/devices/{deviceId}` (R) | V / R |
+| G6 | **Persistence.**<br>• A V3 state with an open sitting is not Firestore-safe: `open_sitting.events[0]` is an array inside an array (app `assertFirestoreSafe`, V). A closed state passed (21.6 KB).<br>• The state grows about 1.6 KB per qualifying sitting (V), so a single document reaches Firestore's 1 MiB limit after roughly 650 qualifying sittings (the limit is from Firestore documentation, U).<br>• This needs a storage design, e.g. state as a JSON string and the audit in a subcollection | V / U |
+| G7 | **Sitting definition.** V3 needs ≥ 10 scoreable events per sitting. Real use gives one or two inhalations per dose, so an integrated V3 would stay in `WARMUP` indefinitely. This is a documented research limitation | R |
+| G8 | **No real input exists yet.** There is no BLE/microphone audio source (F11). The only live path is simulation on synthetic audio (`simulated: true`), which must never feed a personal state | R |
+| G9 | **Display.** V3 outputs are research/diagnostic only (research `ARCHITECTURE.md` §9.4): continuous, no labels, no technique or normal/abnormal claims. App UI items S1–S4 (Entry 1) are still open | R |
+
+**C. No conflict today.**
+- The app contains no personal-baseline code, no V3/Stage 9 assets and no claims about personalization in the new pipeline.
+- Legacy "personalized" wording remains in `IMPLEMENTATION_LOG.md` (Entry 1, D2).
+
+## Verdict
+- **Numerically compatible:** the app's contract outputs are a valid input to V3, as shown by the identical replay and agreement to within 2.1×10⁻⁷.
+- **Not integration-ready.** G1–G8 must be resolved first: a Stage 9 layer, a JS port with canonical hashing, guaranteed timestamps and device IDs, a storage design, and a realistic sitting definition. Integration is also frozen by the research owner.
+
+## Files changed
+- `claude_implementation.md`: this entry, appended.
+- No other file in either repository was changed. Nothing was committed.
+
+## Tests
+`npm test` → **446 checks passed, 0 failed, 0 golden cases skipped** (V). The working tree was clean before this entry.
+
+## Open issues / next step
+- **Research owner:**
+  - record the V3 null-`recorded_at` defect (G4) in the research log;
+  - decide the deployment sitting definition (G7).
+- **App, only if integration is later approved:**
+  - Stage 9 assessment layer (G1);
+  - V3 JS port with Python-compatible canonical JSON and golden replay vectors (G2–G3);
+  - enforce non-null ISO `recorded_at` and a `device_id` for every real recording (G4–G5);
+  - personal-state storage design (G6);
+  - exclude simulated sessions (G8).
+
+---
+
 # Entry 4 — 2026-10-09: Android ONNX Runtime registration fix and on-device pipeline verification
 
 ## Objective
@@ -569,3 +644,211 @@ All checks ran on a candidate tree (`c222632` + exactly the committed changes) i
   - the deprecated `CatalystInstance` shim;
   - remove the override and the patch once an ORT release contains #28266;
   - iOS was not verified.
+
+---
+
+# Entry 7 — 2026-10-11: Separate commit `4c65c4d` aligning the Expo dependencies
+
+## Objective
+Commit the remaining Expo dependency change on its own:
+- only what the Expo 57.0.26 → 57.0.27 upgrade demonstrably requires;
+- `c222632` and `324b78a` unchanged, nothing pushed;
+- no native build or device test (reserved for the next task).
+
+## What was inspected / changed
+**Committed in `4c65c4d`** (`package.json` and `package-lock.json` only):
+- `package.json`: `expo ~57.0.26 → ~57.0.27`.
+- `package-lock.json`: npm's minimal lock for that `package.json`, computed from HEAD's lock with `npm install --package-lock-only`.
+  - 27 entries changed: the root entry, plus expo 57.0.27 and the packages its pinned ranges require, including `@expo/cli` 57.0.28, `expo-modules-autolinking` 57.0.14, `expo-modules-core` 57.0.21, `expo-asset` 57.0.19 and `babel-preset-expo` 57.0.14.
+  - 5 nested `hermes-*` entries were removed.
+  - Every committed entry is byte-identical to the working-tree lock.
+- npm's `peer` flags oscillated on the first pass (`expo` / `@babel/runtime`) and settled on the second pass at HEAD's values; passes 3 and 4 were identical. The stable lock was committed.
+- `postinstall: patch-package`, devDependency `patch-package`, and `hasInstallScript` from `324b78a` are intact.
+
+**Not committed (left in the working tree):**
+- `expo-asset ~57.0.19` / `expo-file-system ~57.0.7` direct dependencies: not needed for the upgrade, because `expo` 57.0.27 itself requires `expo-asset ~57.0.19` and `expo-file-system ~57.0.7`.
+- 13 optional in-range updates that no dependent requires: `@react-navigation/core` 7.23.0, `protobufjs` 7.6.6, `@babel/core` 7.29.7, `@grpc/grpc-js`, `shell-quote` and others. With them go 6 lock removals (e.g. `query-string`) and the working lock's missing `hasInstallScript`.
+- `app.json`, Entry 3, `prompt.md`, `rnconfig.json`, `skills-lock.json`, `.claude/`.
+
+## Results (V, on a scratch tree = `324b78a` + the committed files; placeholder `firebase/config.js`)
+- `npm ci` → exit 0: 683 packages; `postinstall` applied the ORT patch; lock unchanged; expo 57.0.27, `expo-modules-autolinking` 57.0.14.
+- `npm test` (`PRISM_REQUIRE_DATASET=1`) → exit 0: harness passed; 446 / 112 / 254 checks passed, 0 failed.
+- `npx expo export --platform android` → exit 0, a 4 MB `.hbc`.
+- The staged diff contained only the two files, no credentials, and none of the optional updates.
+
+**Not done (scope):**
+- `npm ci` was not run in the real working tree. Its lock is the user's uncommitted version, and the real `node_modules` (expo 57.0.27, `@react-navigation/core` 7.23.0, `protobufjs` 7.6.6) was left untouched.
+- No Gradle build and no device run.
+
+## Open issues / next step
+- **Before the native build:** decide whether to install from the committed lock (`npm ci` requires setting the working-tree lock changes aside) or to keep the current `node_modules`, which carries the 13 uncommitted optional updates.
+- **`app.json`, the user's uncommitted edits:**
+  - removing `edgeToEdgeEnabled` matches Expo 57's prebuild warning;
+  - removing `newArchEnabled` and `splash` is not required by the upgrade, and dropping `splash` changes the prebuilt splash screen;
+  - the ORT config plugin is not needed on Android (Entry 6).
+
+---
+
+# Entry 8 — 2026-10-11: Demo recordings analysed on the phone (bundled reference recordings, waveform)
+
+## Objective
+Let the user show, on the phone, the app analysing a real recording: a Dashboard button that runs the on-device pipeline on a randomly chosen reference-dataset recording bundled with the app, saves the result like any session (History and Firestore, as the user chose), and shows the recording's waveform with the detected inhalation.
+
+## What was inspected / changed
+- **Bundled recordings:** `assets/demo_recordings/demo_01.wav` … `demo_08.wav` (1.5 MB). Eight recordings drawn at random (`shuf`) from the 302 annotated files of `../PRISM smart inhaler/data`, copied byte-identically; the mapping and SHA-256s are in `DEMO_RECORDINGS`. `wav` is in Metro's default `assetExts`, so no config change.
+- **`services/demoSession.js` (new, pure):** `analyseDemoRecording` runs `pipeline.run()` on the WAV bytes (`WavPcmSource`, `input_domain = "reference_dataset"`, `recording_id` = dataset file name) and builds the record with `SessionAggregator` + `buildSessionRecord(…, { source: "wav", simulated: false, note })`, session ID `demo_sess_<ms>`. A pipeline failure becomes a `PROCESSING_ERROR` session, as in `simulationService`. Also `pickDemoRecording`, `demoRecordingOf(session)` and `waveformEnvelope(bytes, bins)` (peak per slice, scaled to 1).
+- **`services/demoRecordings.js` (new, app):** loads the bundled files with expo-asset + expo-file-system (same pattern as `loadModelBytes`); `runDemoSession(getPipeline)`, `loadDemoWaveform(session)`.
+- **`components/Waveform.js` (new):** bars drawn with plain views, detected events shaded from the view's event start/end times, legend "Detected inhalation".
+- **`screens/DashboardScreen.js`:** "Analyse Demo Recording" button and hint; the session is saved with `addNewSession` (local store, then background sync) and its detail screen opens (`navigate("History", { screen: "SessionDetail", …, initial: false })`). Both buttons are disabled while either runs.
+- **`screens/SessionDetailScreen.js`:** a session's `note` is now shown for non-simulated sessions too (information banner); a "Recording" card with the waveform appears when `demoRecordingOf(session)` finds the bundled file.
+- **No change** to the pipeline, model, baseline, contract, `assets/ml/`, the session schema, the sync service or `utils/sessionView.js`. No new dependency.
+- **Display rules:** the screens show status, event times and durations, the note and the waveform; no score, z, RMS or confidence (the UI scan covers the new component).
+
+## Results (V = run)
+- **V, PC, all 8 bundled recordings:** the app code in Node (`analyseDemoRecording`, onnxruntime-node) matches the Python reference (`prism_inference.py --input-domain reference_dataset`) within the contract tolerances on every field. Each finds one scoreable inhalation within about 0.15 s of the annotated inhale (e.g. demo_07: detected 2.72–4.25 s, annotated 2.80–4.11 s). The dataset is mostly in-sample for the deployed model (fold membership not saved), so this is a functional check, not an accuracy result.
+- **V, `npx expo export --platform android`** (to the scratchpad, not `dist/`) → exit 0; the 8 WAVs are bundled; the `.hbc` contains "Analyse Demo Recording" and no `PRISM-CONFORMANCE` / `prism_test_`.
+- **V, `gradlew :app:assembleDebug`** (JDK 17; the debug APK embeds the JS bundle because of `debuggableVariants = []` in the git-ignored `android/app/build.gradle`) → BUILD SUCCESSFUL, 0 errors; the APK contains `res/raw/assets_demo_recordings_demo_0{1..8}.wav`.
+- **V, device** (IV2201, Android 13, `adb install -r`, data kept; Metro not running, embedded bundle): cold launch to the Dashboard in 6 s; one tap on "Analyse Demo Recording" → detail screen after about 10 s with the demo note, "Events detected", Source "WAV file", the waveform of `rec2018-05-03_15h31m15.084s.wav` with the inhalation shaded, and Event 1 · Scoreable, 2.72 s – 4.25 s, 1.53 s. Stored as `demo_sess_1791742099510` (source `wav`, simulated false, `reference_dataset`), synced at 18:08:19 UTC to `users/{uid}/sessions/demo_sess_1791742099510`. Back navigation returns to Session History. The three earlier local sessions are unchanged.
+- **Observed on the device:** History lists 6 sessions, 4 stored on the phone and 2 only in Firestore: simulated sessions from 2026-10-09 15:31 and 15:32 IST. The device log of that minute shows PRISM removed from Recents and relaunched from its icon (manual use); no command in Claude's session created them (inference: they came from taps on the simulate button of the app version of that day).
+
+## Files changed
+New: `assets/demo_recordings/demo_01.wav` … `demo_08.wav`, `services/demoSession.js`, `services/demoRecordings.js`, `components/Waveform.js`. Changed: `screens/DashboardScreen.js`, `screens/SessionDetailScreen.js`, `services/test_sessions.js`, this log. Git-ignored and unchanged here: `android/app/build.gradle` (`debuggableVariants = []`, from the 2026-10-11 device verification).
+
+## Tests (command and outcome)
+- Before: `npm test` → exit 0 (446 / 112 / 254 checks, 0 failed).
+- After: `npm test` → exit 0 (446 / 149 / 255 checks, 0 failed). New test 15 in `services/test_sessions.js` (37 checks): every bundled file listed and SHA-checked, byte-identical to the dataset when `../PRISM smart inhaler/data` exists, bundled by `demoRecordings.js`; the stored output equals `pipeline.run()` on the same bytes; source/simulated/note/input domain; Firestore-safe; stored and synced unchanged under its `session_id`; pipeline failure → `PROCESSING_ERROR`; waveform envelope. The pipeline modules are imported before the test's fake-firebase resolve hook, which otherwise rewrites the baseline's `.json` import.
+- The UI scan (`utils/test_session_view.js`) now also covers `components/Waveform.js`.
+
+## Open issues / next step
+- **Dataset audio in the repository:** the 8 WAVs are dataset recordings. The origin remote is public; check that the dataset's terms allow publishing them before committing `assets/demo_recordings/`.
+- **Demo sessions go to Firestore** (the user's choice) and cannot be deleted from the app; they are marked by `source: "wav"`, the note, `input_domain: "reference_dataset"` and the `demo_sess_` prefix.
+- The 2026-10-11 device verification (build, ORT on device, persistence, offline) is recorded in `PRISM_AUTONOMOUS_PROGRESS.md` (untracked), not yet as an entry here.
+- Not committed.
+
+# Entry 9 — 2026-10-15: V2 pipeline audit (read-only) and INMP441 hardware recordings through the pipeline
+
+## Objective
+1. (2026-10-12 IST, under the user's strict read-only rules: no file changes, no V3/Stage 9 integration.) Audit whether the app runs the V2 deviation-scoring pipeline end to end, and whether live microphone audio reaches it.
+2. (2026-10-15 IST.) Run two recordings from the user's ESP32 + INMP441 prototype through the app pipeline and the Python reference, and give the input level the detector expects. The recordings are `C:\CAPSTONE\hardware\inmp441_recording.wav`, outside this repository; the second run used a new file at the same path.
+
+No file was changed in either task; this entry records them afterwards.
+
+## What was inspected / changed
+- **Call path traced** from audio source to UI, against `../PRISM smart inhaler/src/prism_inference.py` and the contract:
+  - `pipeline/sources/*`, `pipeline/wav.js`, `pipeline/contract.js`, `pipeline/dsp.js`, `pipeline/OnnxDetector.js`;
+  - `pipeline/InferencePipeline.js`: `buildWindows`, `runInference`, `decodeEvents`, `checkScoreability`, `extractEventPcm`, `scoreEvent`;
+  - `pipeline/BaselineStore.js`, `services/*`, `utils/sessionView.js`, the screens and components.
+- **The user's `C:\CAPSTONE\hardware\record_audio.py`** (read only):
+  - the 8000 Hz WAV header is written by the script;
+  - it reads 320,000 bytes from serial;
+  - `pcm = (samples >> 16).astype(np.int16)`.
+- Nothing changed.
+
+## Results (V = run; O = read in code; N = not verified)
+**V2 audit**
+- **The full chain runs on the phone (O + V from earlier device reports):** 124 frame features → ONNX detector → Inhale events → scoreability → 4 V2 features → z against the frozen baseline → `anomaly_score = sqrt(mean z²)`, plus `mean_rms`. Device evidence:
+  - Entry 4: 361 WAVs, 17,331 checks, device = Node with Δ = 0.
+  - The 2026-10-11 run: 845 checks on native ORT 1.31.0, including features, z and score against the golden outputs.
+- **No live input path (O).** There is no microphone capture code, no `RECORD_AUDIO` permission and no BLE library; `bleService` is simulated. Only WAV bytes (`WavPcmSource`) and the synthetic signal (`SimulatedPcmSource`) reach `pipeline.run()`.
+- **Score data is stored and uploaded but never displayed (O).** This covers the score, z-scores, features, `mean_rms` and confidence; the `utils/sessionView.js` whitelist and the UI scan keep them off screen. This is the intended state:
+  - the contract is `DRAFT_NOT_FROZEN`;
+  - its gate fails on G4c (flatness tilt 0.9 = 0.750, centroid_std tilt 0.9 = 0.583);
+  - `threshold` and `classification` are null.
+- **Corrections to the task's context:**
+  - The research repo is `C:\CAPSTONE\PRISM smart inhaler`; `C:\CAPSTONE\PRISM` does not exist.
+  - The 8 demo recordings were matched with Python on the PC. On the phone, 1 demo recording and 1 random recording were run.
+
+**Hardware recordings.** In both runs:
+- **App pipeline:** run in Node with `createNodePipeline()` and `WavPcmSource(bytes, { inputDomain: "prism_hardware" })`.
+- **Reference:** `venv/Scripts/python.exe -B src/prism_inference.py <wav> --input-domain prism_hardware`.
+- **Comparison:** the outputs were compared field by field and saved to the session scratchpad (`hardware_run/`, `hardware_run2/`).
+
+| | File 1 (SHA-256 `95cabefb…`) | File 2 (SHA-256 `2322fd0e…`) |
+|---|---|---|
+| Format | PCM16 mono 8000 Hz, 10.0 s, peak 0.29 | PCM16 mono 8000 Hz, 10.0 s, peak 0.20 |
+| Output (app = Python, identical) | `NO_INHALATION_DETECTED`, 0 events | `NO_INHALATION_DETECTED`, 0 events |
+| Detector windows | 614, all Noise; max P(Inhale) 0.002 | 614, all Noise; max P(Inhale) 0.000 |
+| Sounds found (V, outside the contract) | bursts at 2.0–2.3 and 2.6–2.8 s; sustained 3.0–3.7 s and 5.4–6.1 s at −49 / −51 dBFS | bursts at 3.5–4.4 s; faint 4.4–5.0 s (−54.6 dBFS) and 7.7–8.3 s (−55.9 dBFS) |
+| Diagnostic gain to near reference level (outside the contract) | Noise; one sound partly Drug (P 0.38) | Noise |
+
+- **Start-up drift (V):** both files start with an I2S DC drift (down to −0.28 and −0.18) lasting about 1–2 s.
+- **True sample rate (N):**
+  - The header's 8000 Hz comes from the Python script, while `C:\CAPSTONE\hardware\log.md` describes the sketch capturing at 16 kHz.
+  - A 100 Hz hum with no 50 Hz peak suggests 8 kHz.
+  - Treating file 1 as 16 kHz also found no inhalation.
+  - The user was asked to confirm.
+- **Bit conversion (O):** `samples >> 16` on the 32-bit I2S word equals the contract's `s24 >> 8` for left-justified 24-bit samples.
+
+**Expected input level** (V, in dBFS), from `../PRISM smart inhaler/results/inhale_dataset/inhale_events_v1.csv` and `results/representation_analysis/candidate_features.csv`:
+
+| | min | p5 | median | p95 | max |
+|---|---|---|---|---|---|
+| Event `mean_rms`, 318 scored events | −21.8 | −17.6 | −14.7 | −12.5 | −7.1 |
+| Event peak RMS (0.032 s frames), 364 events | −28.4 | −14.3 | −11.2 | −8.6 | −3.1 |
+| Background RMS around scored events | −79.7 | −75.7 | −55.0 | −38.9 | −31.1 |
+| Event above background (dB) | 15.9 | 23.3 | 40.3 | 61.2 | 71.3 |
+| Scored event duration (s) | 0.5 | 0.9 | 1.6 | 2.3 | 3.3 |
+
+- **Gap:** the hardware sounds were about 35–40 dB below the reference median.
+- **Caveat:** these levels belong to the dataset's own recording chain, which is uncalibrated.
+- **Sound pressure equivalent:** per the INMP441 datasheet (−26 dBFS at 94 dB SPL; not checked in this session), −15 dBFS is about 105 dB SPL at the microphone. That is realistic only with the microphone in or at the inhaler's airflow.
+- **No digital gain:** gain is outside the contract (`s24 >> 8`, no preprocessing), and the detector depends on absolute level.
+
+## Files changed
+None.
+
+## Tests (command and outcome)
+No code change, so no tests were run for these tasks.
+
+## Open issues / next step
+- **Live audio is not implemented** (no microphone or BLE audio path). Hardware audio has only been run from WAV files on the PC.
+- **Next hardware recording:**
+  - a real inhalation through an inhaler, with the INMP441 at the mouthpiece or airflow;
+  - discard the first ~2 s after I2S start;
+  - a 1–2 s inhalation;
+  - confirm the sketch's I2S rate is 8000 Hz.
+- **V2 acceptance** despite gate G4c is the project owner's decision; until then the score stays internal.
+
+# Entry 10 — 2026-10-15: Demo recordings licence, attribution, commits and push
+
+## Objective
+Resolve Entry 8's open licence issue with the licence the user gave for the dataset behind the demo recordings, then commit and push the work as the user asked.
+
+## What was inspected / changed
+- **Dataset identified (V, web):** the file-name pattern (`rec2018-01-22_17h41m33.475s.wav`) and annotation format match:
+  - "Respiratory and Drug Actuation Dataset";
+  - Stavros Nousias, Gerasimos Arvanitis, Aggeliki Anastasiou, Konstantinos Moustakas;
+  - IEEE Dataport, 2022-03-02, doi:10.21227/g84h-ma24.
+
+  The research repo does not record the source.
+- **Licence: CC BY-NC-ND 4.0, as stated by the user.**
+  - Not confirmed independently: the IEEE Dataport page text fetched on 2026-10-15 did not show the licence field.
+  - The licence allows sharing verbatim copies for non-commercial use, with attribution. It does not allow sharing modified versions.
+- **New `assets/demo_recordings/ATTRIBUTION.md`:**
+  - **Contents:** citation, DOI, licence link, each file's dataset file name and SHA-256, and notes on the terms: unmodified (renamed only), non-commercial, no derivatives, no endorsement.
+  - **Not bundled:** test 15 lists only `.wav` files and `demoRecordings.js` requires only the WAVs.
+- **Commits on `ml-integration`:**
+  - `146a64d` `feat: add demo recording analysis with waveform view`: the Entry 8 feature plus the attribution file.
+  - `71ac527` `test: add output-shape probe and storage fixtures to device conformance runner`: the `appRunner.js` hooks used in the 2026-10-11 device verification.
+  - A docs commit with this log, which includes Entries 3, 7 and 8 (until now uncommitted) and Entries 9 and 10.
+- **Left uncommitted, as in every earlier commit:**
+  - `app.json`, `package.json`, `package-lock.json`: the direct `expo-asset` and `expo-file-system` dependencies and the `onnxruntime-react-native` plugin line (Entry 7);
+  - `PRISM_AUTONOMOUS_PROGRESS.md`, `prompt.md`, `rnconfig.json`, `skills-lock.json`, `.claude/`.
+- **Push:** the user asked for a normal push (no force). It publishes these commits and the 8 earlier unpushed ones (`64b726b` … `4c65c4d`).
+
+## Results (V = run)
+- **WAV blobs (V):** the committed WAV blobs hash to the SHA-256 values in `DEMO_RECORDINGS` (`git show HEAD:assets/demo_recordings/demo_0N.wav | sha256sum`).
+- **Secrets check (V):**
+  - no key, token or private-key pattern in `git diff origin/ml-integration..HEAD`;
+  - `firebase/config.js` is git-ignored and untracked;
+  - the tracked `firebase/example_config.js` holds only a placeholder key.
+
+## Files changed
+New: `assets/demo_recordings/ATTRIBUTION.md`. Changed: this log.
+
+## Tests (command and outcome)
+- Before the commits: `npm test` → exit 0 (446 / 149 / 255 checks, 0 failed).
+
+## Open issues / next step
+- **In-app credit:** the demo note names the dataset file but not its authors or licence. If the APK is given to anyone, add a credit line in the app; the licence requires attribution wherever the recordings are shared.
+- **User's config files:** the `app.json`, `package.json` and `package-lock.json` changes are still the user's to commit or drop.
