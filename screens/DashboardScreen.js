@@ -11,6 +11,7 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { useAppContext } from "../context/AppContext";
 import { runSimulatedSession } from "../services/simulationService";
+import { runDemoSession } from "../services/demoRecordings";
 import { getPipeline } from "../services/inferenceService";
 import ResultBadge from "../components/ResultBadge";
 import StatusTag from "../components/StatusTag";
@@ -18,9 +19,11 @@ import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
 import { formatTimestamp } from "../utils/formatters";
 import { describeSession, describeSyncStatus } from "../utils/sessionView";
 
-export default function DashboardScreen() {
+export default function DashboardScreen({ navigation }) {
   const { sessions, addNewSession, deviceStatus, syncStatus, syncNow, localStoreError } = useAppContext();
   const [isSimulating, setIsSimulating] = useState(false);
+  const [isAnalysingDemo, setIsAnalysingDemo] = useState(false);
+  const busy = isSimulating || isAnalysingDemo;
 
   const lastSession = sessions[0] || null;
   const pendingCount = sessions.filter((s) => s.sync?.state === "pending").length;
@@ -37,6 +40,26 @@ export default function DashboardScreen() {
       console.error(e);
     } finally {
       setIsSimulating(false);
+    }
+  }
+
+  async function handleDemo() {
+    setIsAnalysingDemo(true);
+    try {
+      // The real on-device pipeline on a reference dataset recording bundled with the app. The
+      // session is stored like any other; its detail screen opens with the recording's waveform.
+      const session = await runDemoSession(getPipeline);
+      const id = await addNewSession(session);
+      navigation.navigate("History", {
+        screen: "SessionDetail",
+        params: { session: { ...session, id, timestamp: new Date(), sync: { state: "pending" } } },
+        initial: false,
+      });
+    } catch (e) {
+      Alert.alert("Demo not saved", `The demo recording could not be analysed or stored: ${e?.message ?? e}`);
+      console.error(e);
+    } finally {
+      setIsAnalysingDemo(false);
     }
   }
 
@@ -98,9 +121,9 @@ export default function DashboardScreen() {
 
       {/* Simulated session button */}
       <TouchableOpacity
-        style={[styles.simulateBtn, isSimulating && styles.btnDisabled]}
+        style={[styles.simulateBtn, busy && styles.btnDisabled]}
         onPress={handleSimulate}
-        disabled={isSimulating}
+        disabled={busy}
         activeOpacity={0.8}
       >
         {isSimulating ? (
@@ -116,6 +139,28 @@ export default function DashboardScreen() {
       <Text style={styles.hint}>
         Runs the on-device analysis on synthetic test audio (not a recording of an inhalation).
         The session is saved on this phone and uploaded to the cloud when a connection is available.
+      </Text>
+
+      {/* Demo recording button */}
+      <TouchableOpacity
+        style={[styles.simulateBtn, styles.demoBtn, busy && styles.btnDisabled]}
+        onPress={handleDemo}
+        disabled={busy}
+        activeOpacity={0.8}
+      >
+        {isAnalysingDemo ? (
+          <ActivityIndicator color="#fff" />
+        ) : (
+          <>
+            <Ionicons name="musical-notes-outline" size={20} color="#fff" />
+            <Text style={styles.simulateBtnText}>Analyse Demo Recording</Text>
+          </>
+        )}
+      </TouchableOpacity>
+
+      <Text style={styles.hint}>
+        Runs the on-device analysis on a recording from the PRISM reference dataset that is bundled
+        with the app (not recorded with this phone). The session is saved and uploaded like any other.
       </Text>
     </ScrollView>
   );
@@ -244,6 +289,7 @@ const styles = StyleSheet.create({
     gap: SPACING.sm,
     marginBottom: SPACING.sm,
   },
+  demoBtn: { backgroundColor: COLORS.tagBle, marginTop: SPACING.md },
   btnDisabled: { opacity: 0.6 },
   simulateBtnText: { color: "#fff", fontSize: 16, fontWeight: "700" },
 

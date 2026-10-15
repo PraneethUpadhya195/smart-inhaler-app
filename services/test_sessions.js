@@ -7,13 +7,20 @@
  * outputs (assets/ml/v2_validation/golden/expected/) with the app's own SessionAggregator and
  * buildSessionRecord. The last section loads services/sessionService.js and services/authService.js
  * with fake `firebase/*` modules (node:module registerHooks) to check the actual Firestore calls.
+ * Test 15 runs a bundled demo recording (services/demoSession.js) through the Node pipeline and
+ * the same store and sync path.
  *
  * Run: node services/test_sessions.js   (part of npm test)
  */
 import fs from "node:fs";
 import * as nodeModule from "node:module";
+import { createHash } from "node:crypto";
 
 import SessionAggregator from "../pipeline/SessionAggregator.js";
+// Loaded before the fake-firebase resolve hook below is registered (it rewrites relative imports).
+import { createNodePipeline } from "../pipeline/runtime/node.js";
+import WavPcmSource from "../pipeline/sources/WavPcmSource.js";
+import * as demo from "./demoSession.js";
 import { buildSessionRecord, assertFirestoreSafe } from "./sessionRecord.js";
 import { createLocalSessionStore, SESSION_KEY_PREFIX, LocalStoreError } from "./localSessionStore.js";
 import { createSyncService, mergeSessionLists, withTimeout } from "./syncService.js";
@@ -610,6 +617,66 @@ if (typeof nodeModule.registerHooks !== "function") {
     check(authService.isFirebaseConfigured() === true, "isFirebaseConfigured with a configured fake");
   });
 }
+
+// ─── Demo sessions (reference recordings bundled with the app) ───────────────
+
+await test("15. Demo sessions: bundled recordings, real pipeline output, stored and synced like any session", async () => {
+  const DEMO_DIR = new URL("../assets/demo_recordings/", import.meta.url);
+  const DATASET_DIR = new URL("../../PRISM%20smart%20inhaler/data/", import.meta.url);
+  const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
+  const files = fs.readdirSync(DEMO_DIR).filter((f) => f.endsWith(".wav")).sort();
+  check(json(files) === json(demo.DEMO_RECORDINGS.map((r) => r.file)), `every bundled file is listed, and only those (${files.length})`);
+  const loader = fs.readFileSync(new URL("./demoRecordings.js", import.meta.url), "utf8");
+  let comparedWithDataset = 0;
+  for (const r of demo.DEMO_RECORDINGS) {
+    check(sha(fs.readFileSync(new URL(r.file, DEMO_DIR))) === r.sha256, `${r.file} has the listed SHA-256`);
+    check(loader.includes(`require("../assets/demo_recordings/${r.file}")`), `${r.file} is bundled by services/demoRecordings.js`);
+    const original = new URL(r.recordingId, DATASET_DIR);
+    if (fs.existsSync(original)) {
+      comparedWithDataset += 1;
+      check(sha(fs.readFileSync(original)) === r.sha256, `${r.file} is byte-identical to the dataset's ${r.recordingId}`);
+    }
+  }
+  if (comparedWithDataset === 0) console.log("  (../PRISM smart inhaler/data not found: bundled copies not compared with the dataset)");
+  check(demo.pickDemoRecording(() => 0) === demo.DEMO_RECORDINGS[0]
+    && demo.pickDemoRecording(() => 0.9999999999) === demo.DEMO_RECORDINGS.at(-1), "the random pick stays within the bundled set");
+
+  const recording = demo.DEMO_RECORDINGS[0];
+  const bytes = new Uint8Array(fs.readFileSync(new URL(recording.file, DEMO_DIR)));
+  const pipeline = await createNodePipeline();
+  const record = await demo.analyseDemoRecording(async () => pipeline, recording, bytes, { now: () => 1791740000000 });
+  const direct = await pipeline.run(new WavPcmSource(bytes, { inputDomain: "reference_dataset", sourceId: recording.recordingId }));
+  check(record.session_id === "demo_sess_1791740000000" && record.source === "wav" && record.simulated === false,
+    `demo record identity (${record.session_id}, ${record.source}, simulated ${record.simulated})`);
+  check(record.note.includes(recording.recordingId) && /not recorded with this phone/.test(record.note), "the note names the dataset recording");
+  check(record.n_recordings === 1 && json(record.recordings[0]) === json(direct),
+    "the stored output is exactly the pipeline's output for the recording (nothing mocked)");
+  check(record.recordings[0].input.input_domain === "reference_dataset" && record.recordings[0].baseline_domain_validated === true,
+    "input domain is the reference dataset");
+  check(record.session_status !== "PROCESSING_ERROR", `the pipeline ran (${record.session_status})`);
+  assertFirestoreSafe(record);
+
+  check(demo.demoRecordingOf(record) === recording, "a demo session is traced back to its bundled recording");
+  check(demo.demoRecordingOf(makeRecord()) === null && demo.demoRecordingOf(makeProcessingErrorRecord()) === null,
+    "other sessions have no bundled recording");
+
+  const { store, sync, remote } = setup();
+  await sync.saveSession(record);
+  await sync.syncNow();
+  const entry = await store.getSession(record.session_id);
+  check(entry.sync.state === "synced" && remote.docs.has(remote.path("u1", record.session_id)) && json(entry.record) === json(record),
+    "stored on the phone and uploaded unchanged under its session_id");
+
+  const broken = await demo.analyseDemoRecording(() => Promise.reject(new Error("injected pipeline failure")), recording, bytes);
+  check(broken.session_status === "PROCESSING_ERROR" && broken.n_recordings === 0 && broken.note.includes(recording.recordingId)
+    && demo.demoRecordingOf(broken) === null, "a pipeline failure is stored as a processing error, not as a result");
+
+  const wave = demo.waveformEnvelope(bytes, 96);
+  check(wave.peaks.length === 96 && Math.max(...wave.peaks) === 1 && wave.peaks.every((p) => p >= 0 && p <= 1),
+    "waveform envelope: 96 peaks scaled to [0, 1]");
+  check(wave.durationS === record.recordings[0].input.duration_s, `waveform duration matches the recording (${wave.durationS} s)`);
+});
 
 console.log(`\n${passed} checks passed, ${failed} failed, ${skipped} section(s) skipped`);
 process.exit(failed === 0 ? 0 : 1);

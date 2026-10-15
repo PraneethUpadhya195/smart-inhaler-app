@@ -1,9 +1,11 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { View, Text, StyleSheet, ScrollView } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useAppContext } from "../context/AppContext";
+import { loadDemoWaveform } from "../services/demoRecordings";
 import ResultBadge from "../components/ResultBadge";
 import StatusTag from "../components/StatusTag";
+import Waveform from "../components/Waveform";
 import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
 import { formatTimestamp, formatTime } from "../utils/formatters";
 import { describeSession } from "../utils/sessionView";
@@ -14,6 +16,17 @@ export default function SessionDetailScreen({ route }) {
   const passed = route.params.session;
   const session = sessions.find((s) => s.id === passed.id) ?? passed;
   const view = describeSession(session);
+
+  // Sessions analysed from a bundled demo recording: draw that recording (null for any other session).
+  const [waveform, setWaveform] = useState(null);
+  useEffect(() => {
+    let active = true;
+    setWaveform(null);
+    loadDemoWaveform(session)
+      .then((w) => { if (active) setWaveform(w); })
+      .catch((e) => console.warn("[SessionDetail] demo waveform not loaded:", e?.message ?? e));
+    return () => { active = false; };
+  }, [session.id]); // eslint-disable-line react-hooks/exhaustive-deps -- the recording is fixed per session
 
   return (
     <ScrollView
@@ -29,6 +42,7 @@ export default function SessionDetailScreen({ route }) {
           text={view.note ?? "Simulated session: synthetic test audio, not a recording."}
         />
       )}
+      {!view.simulated && view.note && <Banner icon="information-circle-outline" color={COLORS.primary} text={view.note} />}
       {view.legacy && <Banner icon="archive-outline" color={COLORS.textSecondary} text={view.status.description} />}
 
       {/* Input / processing errors */}
@@ -62,6 +76,19 @@ export default function SessionDetailScreen({ route }) {
         </Row>
         {view.sync.detail && <Text style={styles.small}>Last attempt: {view.sync.detail}</Text>}
       </View>
+
+      {/* Bundled demo recording: waveform with the detected events */}
+      {waveform && (
+        <View style={[styles.card, SHADOW.card]}>
+          <Text style={styles.sectionTitle}>Recording</Text>
+          <Text style={styles.small}>{waveform.recordingId}</Text>
+          <Waveform
+            peaks={waveform.peaks}
+            durationS={waveform.durationS}
+            events={view.events.filter((ev) => ev.recordingNumber === null)}
+          />
+        </View>
+      )}
 
       {/* Counts */}
       {view.counts && (
