@@ -2,16 +2,21 @@
 
 The eight WAV files in this folder are unmodified copies of recordings from:
 
-> Stavros Nousias, Gerasimos Arvanitis, Aggeliki Anastasiou, Konstantinos Moustakas,
-> "Respiratory and Drug Actuation Dataset", IEEE Dataport, March 2, 2022,
-> doi: [10.21227/g84h-ma24](https://doi.org/10.21227/g84h-ma24)
+> Stavros Nousias, "pMDI Inhaler Use Audio Dataset", Kaggle (version last updated 2021-08-31),
+> https://www.kaggle.com/datasets/stanou/pmdi-inhaler-use-audio-dataset
 
 **Licence:** [Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
 
+The dataset page asks users to cite:
+
+1. S. Nousias, A. S. Lalos, G. Arvanitis, K. Moustakas, T. Tsirelis, D. Kikidis, K. Votis, D. Tzovaras, "An mHealth System for Monitoring Medication Adherence in Obstructive Respiratory Diseases Using Content Based Audio Classification", *IEEE Access*, vol. 6, pp. 11871–11882, 2018. doi: [10.1109/ACCESS.2018.2809611](https://doi.org/10.1109/ACCESS.2018.2809611)
+2. V. Ntalianis, N. D. Fakotakis, S. Nousias, A. S. Lalos, M. Birbas, E. I. Zacharaki, K. Moustakas, "Deep CNN Sparse Coding for Real Time Inhaler Sounds Classification", *Sensors*, vol. 20, no. 8, p. 2363, 2020. doi: [10.3390/s20082363](https://doi.org/10.3390/s20082363)
+
+**Terms that apply to these files:**
 - **Unmodified:** each file is byte-identical to the dataset file named below; only the file name was changed. The SHA-256 values are also checked by `services/test_sessions.js` (test 15).
 - **NonCommercial:** the recordings, and any build of the app that bundles them, may not be used for commercial purposes.
 - **NoDerivatives:** do not distribute edited, trimmed, resampled or otherwise modified versions of these files.
-- **No endorsement:** the dataset's authors are not affiliated with PRISM and do not endorse it.
+- **No endorsement:** the dataset's author is not affiliated with PRISM and does not endorse it.
 - **Scope:** this licence covers these eight recordings only, not the rest of the repository.
 
 The app analyses a randomly chosen file when "Analyse Demo Recording" is tapped (`services/demoRecordings.js`, `services/demoSession.js`).

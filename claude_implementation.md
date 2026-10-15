@@ -852,3 +852,34 @@ New: `assets/demo_recordings/ATTRIBUTION.md`. Changed: this log.
 ## Open issues / next step
 - **In-app credit:** the demo note names the dataset file but not its authors or licence. If the APK is given to anyone, add a credit line in the app; the licence requires attribution wherever the recordings are shared.
 - **User's config files:** the `app.json`, `package.json` and `package-lock.json` changes are still the user's to commit or drop.
+
+# Entry 11 — 2026-10-15: Correction to Entry 10: the demo recordings come from the Kaggle pMDI dataset
+
+## Objective
+The user said the project does not use the dataset named in Entry 10, and gave the source: https://www.kaggle.com/datasets/stanou/pmdi-inhaler-use-audio-dataset. This entry corrects the attribution.
+
+## What was inspected / changed
+- **Entry 10 was wrong about the source.** It named the IEEE Dataport "Respiratory and Drug Actuation Dataset" (doi:10.21227/g84h-ma24), matched only by file-name pattern; the project does not use that dataset. Entry 10 and the message of the pushed commit `146a64d` are left as they are (append-only log, no history rewrite). This entry and the corrected attribution file supersede them.
+- **Source (V, Kaggle API `datasets/view/stanou/pmdi-inhaler-use-audio-dataset`, fetched 2026-10-15):**
+  - title "pMDI Inhaler Use Audio Dataset";
+  - owner and creator Stavros Nousias (`stanou`);
+  - licence CC BY-NC-ND 4.0 (this confirms the licence the user gave);
+  - last updated 2021-08-31.
+
+  The description asks users to cite two papers. Their author lists and DOIs were taken from Crossref:
+  - Nousias et al., *IEEE Access* 6:11871–11882, 2018, doi:10.1109/ACCESS.2018.2809611;
+  - Ntalianis et al., *Sensors* 20(8):2363, 2020, doi:10.3390/s20082363.
+- **`assets/demo_recordings/ATTRIBUTION.md` rewritten** with this source, the licence and both citations. The file mapping, SHA-256 values and terms are unchanged.
+- **Not checked:** whether the Kaggle files are byte-identical to `../PRISM smart inhaler/data`; the Kaggle download needs an account. Test 15 checks the demo files against that local copy.
+
+## Results (V = run)
+- `npm test` → exit 0 (446 / 149 / 255 checks, 0 failed).
+
+## Files changed
+`assets/demo_recordings/ATTRIBUTION.md`, this log.
+
+## Tests (command and outcome)
+- Before and after: `npm test` → exit 0 (446 / 149 / 255 checks, 0 failed).
+
+## Open issues / next step
+- **In-app credit:** still not added (Entry 10). If the APK is shared, it should credit the Kaggle dataset and its licence.
