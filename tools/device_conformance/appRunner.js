@@ -12,6 +12,7 @@
  */
 
 import * as ort from "onnxruntime-react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Directory, File, Paths } from "expo-file-system";
 
 import { getPipeline } from "../../services/inferenceService";
@@ -22,6 +23,7 @@ import OnnxDetector from "../../pipeline/OnnxDetector";
 import PcmSource from "../../pipeline/PcmSource";
 import SessionAggregator from "../../pipeline/SessionAggregator";
 import WavPcmSource from "../../pipeline/sources/WavPcmSource";
+import { PIPELINE_CONFIG } from "../../pipeline/versions";
 
 const TAG = "[PRISM-CONFORMANCE]";
 const DIR_NAME = "prism_conformance";
@@ -94,6 +96,74 @@ async function runCase(pipeline, dir, c) {
   return { case: c.case, ms, output, error, session, session_error: sessionError };
 }
 
+/**
+ * Optional (request.output_shape_probe = { file, batchSizes }): direct ONNX Runtime calls on real
+ * CNN windows built by the app's own DSP from a recording, reporting the tensors actually passed
+ * to and returned by the session (dims, type, finiteness).
+ */
+async function outputShapeProbe(pipeline, dir, { file, batchSizes = [1, 4] }) {
+  const detector = pipeline._detector;
+  const size = PIPELINE_CONFIG.windowSize * PIPELINE_CONFIG.featureDim;
+  const probe = { file, class_order: [...PIPELINE_CONFIG.classLabels], n_windows: null, runs: [], error: null };
+  try {
+    const bytes = await new File(dir, file).bytes();
+    const pcm = await new WavPcmSource(bytes, { inputDomain: "reference_dataset", sourceId: file }).acquire();
+    const frames = await pipeline.extractFrameFeatures(pcm);
+    const windows = pipeline.buildWindows(frames, pcm.samples.length / pcm.sampleRate);
+    probe.n_windows = windows.length;
+    const start = Math.floor(windows.length / 2);
+    for (const n of batchSizes) {
+      const batch = new Float32Array(n * size);
+      for (let i = 0; i < n; i++) batch.set(windows[start + i].tensor, i * size);
+      const input = new ort.Tensor("float32", batch, [n, PIPELINE_CONFIG.windowSize, PIPELINE_CONFIG.featureDim]);
+      const output = (await detector.session.run({ [detector.inputName]: input }))[detector.outputName];
+      const values = Array.from(output.data);
+      probe.runs.push({
+        input_name: detector.inputName, input_dims: [...input.dims], input_type: input.type,
+        output_name: detector.outputName, output_dims: [...output.dims], output_type: output.type,
+        n_values: values.length, all_finite: values.every(Number.isFinite),
+        first_window_logits: values.slice(0, PIPELINE_CONFIG.nClasses),
+      });
+    }
+    probe.detector_logits_same_window = Array.from(await detector.logits(windows[start].tensor));
+  } catch (e) {
+    probe.error = errorInfo(e);
+  }
+  const summary = probe.runs.map((r) => `${JSON.stringify(r.input_dims)} -> ${JSON.stringify(r.output_dims)} ${r.output_type} finite=${r.all_finite}`);
+  console.log(`${TAG} output shape probe: ${summary.join("; ")}${probe.error ? ` error ${probe.error.message}` : ""}`);
+  return probe;
+}
+
+/** Only test keys can be written or removed by request.storage_fixture; real sessions are never touched. */
+const FIXTURE_KEY_PREFIX = "@PRISM:session:prism_test_";
+
+/**
+ * Optional (request.storage_fixture = { put: [{ key, value }], remove: [key] }): writes or removes
+ * test entries in the app's session storage, e.g. a corrupt entry, to check how the history UI
+ * handles them. Keys outside FIXTURE_KEY_PREFIX are refused.
+ */
+async function applyStorageFixture({ put = [], remove = [] }) {
+  const report = { put: [], removed: [], refused: [] };
+  for (const { key, value } of put) {
+    if (typeof key !== "string" || !key.startsWith(FIXTURE_KEY_PREFIX) || typeof value !== "string") {
+      report.refused.push(key);
+      continue;
+    }
+    await AsyncStorage.setItem(key, value);
+    report.put.push(key);
+  }
+  for (const key of remove) {
+    if (typeof key !== "string" || !key.startsWith(FIXTURE_KEY_PREFIX)) {
+      report.refused.push(key);
+      continue;
+    }
+    await AsyncStorage.removeItem(key);
+    report.removed.push(key);
+  }
+  console.log(`${TAG} storage fixture: put ${report.put.length}, removed ${report.removed.length}, refused ${report.refused.length}`);
+  return report;
+}
+
 /** Failure paths: each must surface an error and never yield a contract output. */
 async function errorPaths(modelBytes) {
   const results = [];
@@ -147,6 +217,13 @@ export async function runIfRequested() {
     error_paths: null,
     finished_at: null,
   };
+  if (request.storage_fixture) {
+    try {
+      results.storage_fixture = await applyStorageFixture(request.storage_fixture);
+    } catch (e) {
+      results.storage_fixture = { error: errorInfo(e) };
+    }
+  }
   try {
     const started = Date.now();
     const pipeline = await getPipeline();
@@ -160,6 +237,9 @@ export async function runIfRequested() {
       output_metadata: detector.session.outputMetadata ?? null,
     };
     console.log(`${TAG} model loaded in ${results.model.load_ms} ms, sha256 ${detector.modelSha256}`);
+    if (request.output_shape_probe) {
+      results.model.output_shape_probe = await outputShapeProbe(pipeline, dir, request.output_shape_probe);
+    }
     for (const c of request.cases) results.cases.push(await runCase(pipeline, dir, c));
 
     const sim = await runSimulatedSession(getPipeline);
