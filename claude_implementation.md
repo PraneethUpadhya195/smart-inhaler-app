@@ -883,3 +883,521 @@ The user said the project does not use the dataset named in Entry 10, and gave t
 
 ## Open issues / next step
 - **In-app credit:** still not added (Entry 10). If the APK is shared, it should credit the Kaggle dataset and its licence.
+
+# Entry 12 — 2026-10-16: Why ESP32 + INMP441 recordings give NO_INHALATION_DETECTED (investigation, no code change)
+
+## Objective
+Find out whether PRISM's signal processing is responsible for detecting no inhalations in the ESP32 + INMP441 recordings, and separate five candidate causes: conversion, feature extraction, amplitude scaling, model inference and temporal post-processing. The user's constraints: no change to production code, the model, thresholds or gain.
+
+## What was inspected / changed
+- **Hardware (`C:\CAPSTONE\hardware`, outside this repo):**
+  - `record_audio.py` and `log.md`, read only.
+  - **The ESP32 sketch is not in the folder.** Its I2S configuration (rate, slot, mode) could not be read.
+  - `log.md` still describes the sketch at 16 kHz; `record_audio.py:8` writes 8000 Hz into the WAV header.
+- **Research repo:**
+  - **Training path:** `train_cnn.py` (`__main__` lines ~375–419, `run_cnn_cv`), with `librosa_extractor.extract_features_from_audio` / `load_audio`, `feature_extractor.trim_to_events` / `create_windows`, `config.py` and `model_cnn.py`.
+  - **Inference path:** `post_event.generate_window_predictions` / `group_inhale_events` / `TemporalGroupingConfig`, plus `prism_inference.check_input` / `read_wav` / `analyze_recording`.
+  - **Not available:** the training feature cache (`data/extracted/`). The exact features the model was trained on cannot be compared byte for byte.
+- **App:** `pipeline/wav.js` `decodeWav`, `pipeline/contract.js` `checkInput`, `pipeline/dsp.js` `processPcm`, `pipeline/InferencePipeline.js` (`extractFrameFeatures`, `buildWindows`, `runInference`, `decodeEvents`).
+- **Nothing changed** in any repository. All diagnostics are scripts in the session scratchpad (`hw_diag/`).
+
+## Results (V = run; O = read in code; N = not verified)
+- **Recordings analysed (V):** `hw3` (SHA-256 `b85d0b86…`, 2026-10-16 12:51) and `hw4` (`cf88e459…`, 13:54). The two earlier hardware files were overwritten at the same path; only their outputs (Entry 9) remain.
+- **Processing is the same in training, Python inference and the app (O).**
+  - Audio is int16/32768 with no gain, DC removal or normalisation.
+  - All three use the same 124-feature extractor (librosa_extractor; dsp.js in parity).
+  - Windows: 25 frames, stride 2. No feature scaler in training (`train_cnn` feeds raw features; BatchNorm only inside the model).
+  - Decision: softmax then argmax, no threshold.
+  - Grouping uses the defaults: no smoothing, no minimum confidence or duration, max gap 0. Any single Inhale window therefore becomes an event, so grouping cannot drop one. Scoreability marks events but never removes them.
+- **App = Python on both files (V):**
+  - All 614 window labels are identical.
+  - Probability difference ≤ 9.3e-10.
+  - Frame features differ by at most 1.2e-4.
+- **Detector output (V):** all 614 windows are Noise in both files. Max P(Inhale) is 0.0006 (hw3) and 0.0004 (hw4). The loss is at the classifier, not post-processing.
+- **The I2S→PCM conversion is consistent with correct decoding (V, data checks; sketch N):**
+  - Max |x| is 7256 and 13226, which rules out right-aligned 24-bit data, where `>>16` would give |x| ≤ 127.
+  - Low bits are used uniformly (0.50 / 0.25 / 0.06 / 0.004 for 1 / 2 / 4 / 8 bits), so there is no truncation.
+  - Even and odd samples have the same RMS (correlation 0.998), so there is no stereo interleave.
+  - There is no clipping.
+  - The code (`record_audio.py:49,53`, signed little-endian int32, arithmetic shift by 16) equals `s24 >> 8` for left-justified 24-bit samples.
+- **Low frequencies dominate the hardware signal (V):**
+  - Over 99% of power is below 20 Hz in both files, against −67 dB median in the reference.
+  - The rms below 20 Hz is −30.5 dBFS in hw3 after the start-up drift (−0.19 to −0.20 FS at 0 s, settling over ~2 s).
+  - **Effect on features:** during audio bursts, ZCR, centroid, flatness and rolloff sit at the 0th–15th percentile of reference inhale frames. After a 20 Hz high-pass, centroid, flatness and rolloff return to the 44th–76th; ZCR stays at the 1st–6th.
+- **Gain changes only MFCC-0 (V).** It shifts by √128·ΔdB: −113 / −226 / −396 at −10 / −20 / −35 dB. MFCC 1–39 change by < 0.08 and the spectral features by < 0.002.
+- **Hardware bursts are about 32 dB too quiet (V).** MFCC-0 sits at the 3rd percentile of reference inhale frames (median −517 vs −156). Burst levels (mean frame RMS) are −45.5 to −35.8 dBFS (hw3) and −41.2 to −30.0 dBFS (hw4), each 0.08–0.87 s long.
+- **Controlled tests on 80 reference recordings with 85 annotated inhalations (seed 7; re-quantised to int16; unchanged detector) (V):**
+  - **Gain sweep, recall:** 100% at 0, −3 and −6 dB; 98.8% at −9; 81.2% at −12; 29.4% at −15; 4.7% at −18; 0% at −20 to −50 dB.
+  - **By absolute inhalation level (mean frame RMS):**
+
+    | Level (dBFS) | Recall |
+    |---|---|
+    | ≥ −24 | 99–100% |
+    | −27 to −24 | 80% |
+    | −30 to −27 | 46% |
+    | −33 to −30 | 15% |
+    | < −33 | 0% |
+  - **Hardware low frequencies (<20 Hz) added at the recorded level:** 100% at 0 dB. 98.8% and 80.0% at −9 and −12 dB, the same as without them. A constant DC of −0.03 FS also gives 100%. A 20 Hz high-pass does not rescue attenuated inhalations.
+  - **16 kHz capture labelled as 8 kHz (simulated):** recall 0/85, with 9 spurious events.
+- **Diagnostic transforms of the hardware files (V, outside the contract):**
+  - hw4's sound at 3.0–3.3 s becomes Inhale (P 0.98, event 2.99–3.32 s) after a 20 Hz high-pass plus +30 dB (0.08% clipped). At +20 dB it reaches only P 0.445, below Noise in the argmax.
+  - hw3's sounds become Drug, not Inhale (max P(Inhale) 0.125).
+
+## Conclusions
+- **No processing bug found.** Conversion, features, model execution, app/Python parity and grouping are all consistent.
+- **Primary cause (V):** the detector is level-dependent by design (raw MFCC-0, no normalisation) and needs inhalations at about −24 dBFS mean frame RMS or louder. The hardware sounds are −45 to −30 dBFS.
+- **Unknown (N):** whether these sounds were inhalations at all, and whether the INMP441 reaches that level when mounted at the inhaler airflow. The mic was not on the inhaler (`log.md`).
+- **Unverified and fatal if true (N):** a sample-rate mislabel. The sketch is missing, and `log.md` says 16 kHz.
+- **Not inferred:** that a gain stage is appropriate. Any input calibration would be a contract change and needs data from inhaler-mounted recordings.
+
+## Files changed
+This log only.
+
+## Tests (command and outcome)
+No code change; `npm test` not re-run.
+
+## Open issues / next step
+1. **Confirm the capture rate:** check the sketch's I2S rate, or record a known tone (e.g. 1 kHz) and check its frequency and the 10 s duration.
+2. **Record controlled inhalations at the deployment position:** INMP441 mounted at the inhaler mouthpiece or airflow, quiet first ~2.5 s, 1–2 s inhalations.
+3. **Measure each inhalation's mean frame RMS against the ~−24 dBFS edge,** then run the unchanged pipeline.
+
+# Entry 13 — 2026-10-16: Five ESP32 + INMP441 recordings (`C:\CAPSTONE\hardware\recordingds`) through the unchanged detector
+
+## Objective
+Inspect the five recordings in `C:\CAPSTONE\hardware\recordingds` (outside this repo), then:
+- measure their level, background and candidate acoustic events;
+- run each original WAV through the unchanged detector;
+- compare the results with the reference recall-vs-level statistics in Entry 12.
+
+No model, feature extractor, threshold, firmware or pipeline change, and no transform of the WAVs before inference.
+
+## What was inspected / changed
+- **Recordings, 2026-10-16:** `inmp441_20261016_142709.wav` (SHA-256 `e2b74246…`), `_142744` (`3fbbb9e1…`), `_142806` (`9e9524d0…`), `_142823` (`8fc42967…`), `_142839` (`e3623b5f…`).
+- **Not analysed:** `C:\CAPSTONE\hardware\inmp441_recording.wav` (14:26, `19f0b81e…`), which is not in `recordingds`.
+- **Capture code (read only).**
+  - **`record_audio.py`:** conversion unchanged (`"<i4"`, `>> 16`, header 8000 Hz); it now writes timestamped files to `recordingds/`.
+  - **Sketch `C:\CAPSTONE\hardware\prism_hardware.cpp`** (file time 14:32, after the recordings) configures:
+    - ESP_I2S `I2S_MODE_STD` (Philips);
+    - `SAMPLE_RATE = 8000`, `I2S_DATA_BIT_WIDTH_32BIT`, `I2S_SLOT_MODE_MONO`, `I2S_STD_SLOT_LEFT`;
+    - 80,000 samples sent as raw int32 bytes over `Serial.write` at 921,600 baud, after an `AUDIO_BEGIN` line.
+
+  The configured rate matches the WAV header. The 16 kHz in `log.md` is outdated. The effective clock rate was not measured.
+- **Existing tools reused, unchanged.**
+  - **`../PRISM smart inhaler/results/recording_runs/run_recording.py`:** its `main(wav, "prism_hardware")` runs the contract output, per-window logits and probabilities, descriptive class segments and a diagnostic plot. It was imported by a wrapper that only redirects its `OUT_ROOT` to the session scratchpad, so nothing was written to the research repo.
+  - **`post_event._rms_envelope`:** 256-sample frames, hop 64.
+  - **`representation_analysis.recording_background_rms`:** the median of that envelope, the same definition as the reference background.
+- **New, diagnostic only (no existing script provides these):**
+  - an "audio-band" envelope: the same function on a 20 Hz high-passed copy, used only for measurement;
+  - candidate acoustic events: audio-band envelope above background + 10 dB, gaps ≤ 0.1 s merged, ≥ 0.1 s kept.
+
+  Neither touches inference.
+- **No file changed** except this log.
+
+## Results (V = run)
+- **Integrity (V):** all five files are mono 16-bit PCM at 8000 Hz:
+  - 80,000 frames (10.000 s), RIFF size consistent, chunks `fmt ` (16) and `data` (160,000), no trailing bytes;
+  - soundfile and wave decode identically;
+  - all bits used (low-bit-zero fractions 0.50 / 0.06 / 0.004);
+  - no stuck samples (longest run of identical samples 3–5);
+  - no sample at ±32767/−32768.
+- **Capture problems (V):**
+  - **Start-up DC:** −0.18 to −0.19 FS mean in the first 0.5 s in 3 of 5 files.
+  - **Sub-20 Hz dominance:** −0.0 to −0.3 dB of total power, i.e. ≥ 93% of power below 20 Hz (reference median −67 dB).
+  - **Integer wraparound in `_142806`:** at 3.478–3.519 s there are 18 sign-flip jumps between near +FS and −FS (max step 65,202). Unwrapping by ±65,536 gives a continuous waveform (max step 4,707) peaking at 36,444, 11% over int16 full scale. The over-range signal wrapped instead of clipping. Where the wrap happens (microphone overload or capture alignment) was not determined.
+
+| File | Peak (dBFS) | Overall RMS (dBFS) | PRISM-envelope background, raw (dBFS) | Audio-band background (dBFS) | Candidate events, s (audio-band mean frame RMS, dBFS) | Detector (unchanged) |
+|---|---|---|---|---|---|---|
+| `_142709` | −10.9 | −23.1 | −32.4 | −60.0 | 3.12–3.41 (−38.9); 3.63–4.52 (−45.9); 5.63–6.46 (−43.7) | NO_INHALATION_DETECTED; 614/614 Noise; max P(Inhale) 0.0015 |
+| `_142744` | −7.8 | −20.0 | −31.1 | −59.9 | 3.04–3.21 (−47.1); 3.58–4.56 (−40.7); 5.94–7.01 (−42.1) | NO_INHALATION_DETECTED; 614 Noise; max P(Inhale) 0.0004 |
+| `_142806` | −0.0 (wrap) | −15.7 | −27.0 | −58.0 | 3.36–4.50 (−29.0); 5.10–6.27 (−39.0) | NO_INHALATION_DETECTED; 614 Noise; max P(Inhale) 0.0006 |
+| `_142823` | −5.6 | −17.9 | −29.3 | −58.5 | 0.00–0.22 (−45.7, start-up); 4.81–5.84 (−37.4); 6.58–7.75 (−31.6) | NO_INHALATION_DETECTED; 613 Noise + 1 Drug (P 0.507 at 6.656 s); max P(Inhale) 0.0022 |
+| `_142839` | −6.8 | −18.5 | −26.4 | −57.5 | 4.08–5.00 (−38.3); 5.95–7.36 (−36.8); 7.98–8.34 (−36.4) | NO_INHALATION_DETECTED; 614 Noise; max P(Inhale) 0.0064 |
+
+- **Candidate events: 14 in total.**
+  - Durations are 0.17–1.41 s; 9 last 0.8–1.4 s.
+  - They sit 12.8–29.0 dB above the audio-band background (reference events: 23–61 dB, median 40).
+  - **Level bands (Entry 12 recall curve):** 12 are below −33 dBFS (the ~0% band), 1 is at −31.6 (15% band) and 1 at −29.0 (46% band).
+  - Inside every candidate the window argmax is Noise (min P(Noise) ≥ 0.998) except one Drug window in `_142823` at 6.66 s. Max P(Inhale) inside any candidate is ≤ 0.0015.
+- **Background:** the audio-band background (−57.5 to −60.0 dBFS; −55.3 to −60.0 after 2.5 s) is close to the reference median (−55 dBFS). The PRISM-convention background on the raw waveform (−26.4 to −32.4 dBFS) is dominated by sub-20 Hz content.
+- **App = Python (V):** the app pipeline (`pipeline.run()` and the per-window path, `prism_hardware`) gives the same status, window counts and max probabilities, to 6 decimals, on all five files.
+
+## Interpretation (limits)
+- **No candidate is a confirmed inhalation.** There are no annotations, and what was done during each recording was not recorded here.
+- **Recall bands are not detection probabilities for these sounds.** The bands come from digitally attenuated reference inhalations of a different, uncalibrated recording chain. The audio-band level is a new diagnostic measure.
+- **The loudest candidate (`_142806`, −29.0 dBFS) also contains the wraparound** and strong sub-20 Hz pressure.
+
+## Files changed
+This log only. Outputs are in the session scratchpad: `recordingds_runs/<stem>/` (run_recording.py outputs), `recordingds_runs/measurements.json`, and the scripts `recordingds_run_existing.py`, `recordingds_measure.py` and `recordingds_detail.py`.
+
+## Tests (command and outcome)
+No code change; `npm test` not re-run.
+
+## Open issues / next step
+- **Label the five recordings:** what was done, and when.
+- **Explain the wraparound in `_142806`.** A loud steady tone (e.g. 1 kHz) at rising volume would show both the true rate (peak at 1000 Hz) and whether over-range signals clip or wrap, and at what level.
+- **Record annotated inhalations with the INMP441 at the inhaler airflow,** without breath blowing straight onto the port.
+
+# Entry 14 — 2026-10-16: The five recordings contain inhaler use; level-vs-shape probe (diagnostic only)
+
+## Objective
+The user stated that all five `recordingds` recordings (Entry 13) contain inhaler use, with the inhaler near the microphone, not mounted on it. The detector's five `NO_INHALATION_DETECTED` results are therefore misses. This entry tests whether level alone explains them.
+
+## What was inspected / changed
+- **Probe (`SP\recordingds_level_probe.py`, run twice, identical output).** For each of the 14 candidate sounds from Entry 13:
+  1. remove content below 20 Hz from the whole recording;
+  2. scale the recording so that this candidate's audio-band mean frame RMS reaches −24 dBFS (edge of ~99% reference recall), and separately −15 dBFS (reference inhalation median);
+  3. re-quantise to int16;
+  4. run the unchanged research detector (`generate_window_predictions` plus contract grouping).
+- **Diagnostic only, outside the contract.** It is not a fix and not a proposal for gain in the product. The original files were not modified.
+- **Outputs (session scratchpad):** `recordingds_runs/level_probe.json` and `level_probe_stdout.log`.
+
+## Results (V = run)
+- **No candidate becomes Inhale at either target.** 28 of 28 runs have zero Inhale windows inside the candidate, and the highest P(Inhale) in any of them is 0.0098. Clipping inside candidates is ≤ 2.7%.
+- **At −15 dBFS, five candidates acquire Drug windows** (the model's aerosol-spray class):
+
+  | Recording | Candidate | Drug windows | Max P(Drug) |
+  |---|---|---|---|
+  | `_142709` | 5.63–6.46 s | 33 of 52 (majority) | 0.985 |
+  | `_142806` | 5.10–6.27 s | 25 of 73 | 0.921 |
+  | `_142823` | 4.81–5.84 s | 8 of 64 | 0.964 |
+  | `_142823` | 6.58–7.75 s | 15 of 74 | 0.935 |
+  | `_142839` | 5.95–7.36 s | 24 of 88 | 0.949 |
+
+  The other candidates stay Noise. That includes the loudest, `_142806` 3.36–4.50 s, which contains the wraparound.
+- **The scaling also raises the background by the same gain,** so each candidate keeps its 13–29 dB margin over background (reference events: median 40 dB).
+
+## Interpretation (limits)
+- **Level is a confirmed cause, but not the only one.** Brought to reference loudness, these sounds are still classified as Noise or Drug, not Inhale. In this recording chain and placement, the inhaler-use sounds do not resemble the reference inhalations to the model.
+- **Which candidate is the inhalation is still not labelled.** Whether the canister was actuated is not known either, so a Drug label cannot be judged right or wrong.
+- **Possible contributors, not separated:**
+  - microphone placement (reference: mic on the inhaler);
+  - microphone and frequency-response differences;
+  - lower margin over background;
+  - airflow on the mic port;
+  - limited generalisation of the detector, which was trained on 3 subjects and one device.
+
+## Files changed
+This log only.
+
+## Tests (command and outcome)
+No code change; `npm test` not re-run.
+
+## Open issues / next step
+- **Label the five recordings:** inhale and exhale times, and whether the canister was pressed.
+- **Record with the INMP441 mounted on the inhaler,** as in the reference setup, and repeat Entries 13 and 14.
+- **If mounted recordings are still not recognised,** the detector needs PRISM-hardware data. That is a research decision outside the current constraints.
+
+# Entry 15 — 2026-10-16: DC offset, RMS and sub-20 Hz energy over time: `_150317` vs `_142744`
+
+## Objective
+Measure DC offset, RMS and energy below 20 Hz over time in the new recording `C:\CAPSTONE\hardware\recordingds\inmp441_20261016_150317.wav` (SHA-256 `96351973…`, 15:03), and compare it with `inmp441_20261016_142744.wav` (`3fbbb9e1…`, unchanged). The user did not say what was done during `_150317`.
+
+## What was inspected / changed
+- **Script:** `SP\dc_lf_compare.py`, read-only.
+- **Method:**
+  - 0.5 s blocks on the original int16/32768 samples;
+  - one zero-phase 4th-order 20 Hz Butterworth low-pass splits each file into a component below 20 Hz and one at 20 Hz and above, which sum back to the original;
+  - DC is the block mean; "wander" is the RMS of the below-20 Hz component with the block mean removed.
+- **Outputs:** `SP\dc_lf_150317\dc_lf_compare.json`, plus the research CLI output `contract_output_150317.json`.
+- **Unchanged:** sketch and `record_audio.py` (file times 14:32 and 14:27, before this recording). Nothing in either repo changed except this log.
+
+## Results (V = run)
+
+| | `_150317` | `_142744` |
+|---|---|---|
+| Format | mono, 16-bit, 8000 Hz, 10.000 s | same |
+| Peak / overall RMS | −12.4 / −25.0 dBFS | −7.8 / −20.0 dBFS |
+| DC, first 0.5 s | −0.185 FS | −0.037 FS (then −0.364 at 0.5–1.0 s) |
+| DC after 2.5 s (mean) | −0.0031 FS | +0.0005 FS |
+| DC behaviour | Smooth monotonic decay (−0.185, −0.129, −0.090, −0.044, −0.024, −0.011 at 0.5 s steps); 0.5 s blocks within ±0.01 FS from 3.0 s | Block means swing −0.36 to +0.05 FS throughout; never stays within ±0.01 FS |
+| Sub-20 Hz wander after 2.5 s | −43.9 dBFS | −29.1 dBFS |
+| Audio band (≥ 20 Hz) after 2.5 s, RMS | −56.7 dBFS | −45.5 dBFS |
+| Audio band, quietest 10% of 0.5 s blocks after 2.5 s | −64.4 dBFS | −61.7 dBFS |
+| Energy share below 20 Hz, whole file / after 2.5 s | 99.8% / 95.9% | 99.8% / 97.7% |
+| Sub-20 Hz power below 5 Hz (Welch, after 2.5 s) | 87% | 94% |
+| Detector (unchanged, research) | NO_INHALATION_DETECTED; 614/614 Noise; max P(Inhale) 0.0003 | NO_INHALATION_DETECTED (Entry 13) |
+
+- **Audio-band activity in `_150317`:** only 3.0–4.5 s, at −56 to −49 dBFS (0.5 s blocks). In the same span `_142744` reaches −40 to −39 dBFS.
+
+## Interpretation (limits)
+- **Two different patterns.** `_150317` shows a start-up offset that decays smoothly and settles in about 3 s, and much less slow wander. In `_142744` the "DC" is continuous sub-5 Hz wander, which fits air pressure or handling at the mic.
+- **Below-20 Hz energy still dominates both files.** That is because their audio-band content is so quiet.
+- **Whether `_150317` is a quiet baseline or inhaler use with a different setup is not known.** The comparison describes the signals, not their cause.
+
+## Files changed
+This log only.
+
+## Tests (command and outcome)
+No code change; `npm test` not re-run.
+
+## Open issues / next step
+Ask the user what `_150317` contains. If it is a still baseline, its values (DC settling ≈ 3 s, wander ≈ −44 dBFS, audio floor ≈ −64 dBFS) are the device's own floor.
+
+# Entry 16 — 2026-10-16: `_150317` is a silent baseline (user); device floor and burst check
+
+## Objective
+The user confirmed that `inmp441_20261016_150317.wav` is a silent baseline with no inhaler use. This entry records what that establishes about the device's own behaviour (Entry 15 measurements). It also checks whether the sound at 3.4 s in the silent file is a recurring device artefact at a fixed time after capture start.
+
+## What was inspected / changed
+- **Script:** `SP\burst_check.py`, read-only.
+- **Recordings checked:** `_150317`, the five `recordingds` inhaler recordings, and today's 12:51 and 13:54 files (`hw3`, `hw4`).
+- **Method:**
+  - audio-band (≥ 20 Hz) RMS in 0.1 s steps from 2.0 to 5.0 s;
+  - first onset after 2.5 s (a 32 ms frame at least 10 dB above the 20th-percentile frame);
+  - spectral share of the 0.4 s after the onset;
+  - sample continuity near the onset (maximum second difference relative to the file's 99.9th percentile).
+- **Nothing changed** except this log.
+
+## Results (V = run)
+- **Device floor in silence (from Entry 15):**
+  - Start-up offset −0.185 FS, decaying smoothly (−0.129 / −0.090 / −0.044 / −0.024 / −0.011 FS in successive 0.5 s blocks) and within ±0.01 FS from 3.0 s.
+  - Slow drift below 20 Hz −43.9 dBFS after 2.5 s, 87% of it below 5 Hz.
+  - Audio-band RMS: −56.7 dBFS after 2.5 s including the bump below; 0.1 s blocks in quiet stretches −58 to −66 dBFS (quietest 10% of 0.5 s blocks: −64.4).
+- **The sound in the silent file:**
+  - onset 3.43 s, peak frame −44.2 dBFS at 3.49 s, activity to about 4.6 s;
+  - spectral centroid 77 Hz, 98.8% of energy at 20–300 Hz;
+  - no sample discontinuity (ratio 0.7).
+- **Onsets after 2.5 s in the other files vary:** 2.62, 3.02, 3.35, 4.62 and 4.07 s (`recordingds`); 2.80 s (`hw3`); 2.99 s (`hw4`).
+  - **Spectral centroids:** 41–191 Hz in `_142709` and `_142744`; 599–1200 Hz in `_142806`, `_142823`, `_142839`, `hw3` and `hw4`.
+  - **Continuity:** ratios ≤ 0.7 in all files, so no digital glitches.
+
+## Interpretation (limits)
+- **No fixed-time capture artefact was found.** The silent file's sound is a low-frequency event without a digital glitch, consistent with a mechanical bump or room sound. Its source is not known.
+- **The device floor is lower than the reference background median (−55 dBFS),** so hardware self-noise is not what limits detection.
+- **The inhaler sounds (−47 to −29 dBFS, Entry 13) are 15–35 dB above the device floor.** They are real captured sounds.
+- **Some first onsets in inhaler files look like the silent bump.** `_142709` at 2.62 s and `_142744` at 3.02 s are dominated by energy below 300 Hz and may be handling rather than airflow (not verified).
+- **The start-up offset is a device property.** About the first 3 s of each capture are not usable as audio.
+
+## Files changed
+This log only.
+
+## Tests (command and outcome)
+No code change; `npm test` not re-run.
+
+## Open issues / next step
+- **Start-up offset:** discard the first ~3 s, or have the sketch wait longer before `AUDIO_BEGIN`. That would be a firmware change, for the user to decide.
+- **Recording setup:** keep the device still, and record annotated inhalations with the INMP441 mounted at the inhaler airflow.
+
+# Entry 17 — 2026-10-16: Audio-only compatibility experiment for the ESP32 + INMP441 inhaler recordings (no production change)
+
+## Objective
+Find out whether audio preprocessing alone can make the existing pipeline detect real inhalations in the five ESP32 + INMP441 inhaler recordings. Audit the signal chain from capture to ONNX at the same time. The model, feature extractor, thresholds, inference, app and firmware must stay unchanged.
+
+## What was inspected / changed
+- **Recordings** (`C:\CAPSTONE\hardware\recordingds`):
+  - inhaler use: `inmp441_20261016_142709/142744/142806/142823/142839.wav`;
+  - silent baseline: `_150317.wav`.
+  - **The supplied name `inmp441_20261016_142744(1).wav` was not found** (searched `C:\CAPSTONE`, Downloads, Desktop, Documents). `…142744.wav` (`3fbbb9e1…`) was used as a disclosed stand-in.
+- **Code read:**
+  - firmware `prism_hardware.cpp`; `record_audio.py`;
+  - research `prism_inference.py`, `post_event.py`, `librosa_extractor.py`, `feature_extractor.py`, `train_cnn.py`, `model_cnn.py`, `config.py`;
+  - app `pipeline/*`.
+- **New workspace: `experiments/audio_compatibility/`.** All outputs and scripts live there; see its `README.md` and `summary.md`.
+  - **Scripts:** `scripts/common.py` (imports the production functions unchanged), steps `01`–`09`, `transforms.py`, `plotlib.py`, `app_windows.mjs`, `compare_app_python.py`, `reproduce_best.py`, `run_all.sh`.
+  - **Hand-made input:** `annotations.csv`, with ESTIMATED actuation / inhale / exhale intervals, ±0.10 s onsets and ±0.15 s offsets, and confidence.
+- **No dependency installed** (the research venv already had everything). Scripts ran with `python -B`, so nothing was written to the research repo.
+
+## Results (V = run; O = read in code; N = not verified)
+- **Baseline (V):** all 6 files `NO_INHALATION_DETECTED`. Max P(Inhale) 0.0003–0.0064. One Drug window (142823, 6.656 s, P 0.507), inside the estimated exhalation. App = Python on all 6 (max |Δp| 6e-7).
+- **Audit:**
+  - **Correct (V/O):** decoding (`<i4`, `>>16`, LE, left slot, PCM header); 8 kHz time axis (1251 frames, 614 windows, 16 kHz rejected); feature parameters and known-answer tests; training/inference window layout and class order; ONNX logits / softmax / batch; timing with a synthetic burst (2.992 / 4.512 s for 3.0 / 4.5 s).
+  - **Capture defect (V):** int16 wraparound in 142806 at 3.478–3.519 s; unwrapped peak 36,444. Its cause is N.
+  - **Not verified (N):** the physical sample rate; byte-level training features (cache absent); I2S DMA sample drops.
+- **Signal compatibility (V, annotated intervals vs 261 reference inhalations, production features):**
+  - **Below-20 Hz share:** 94.8–99.8% of inhalation-interval power (reference ≈ 0%).
+  - **Level:** MFCC-0 robust z −10.3, about 27 dB below the reference.
+  - **Spectral shape:** reference inhale peaks +5.7 dB at 1.27 kHz; hardware inhale −0.9 dB there and +5.3 dB at 126 Hz.
+- **Experiments (V):** 28 configurations × 6 files plus wraparound repair on 142806 (169 runs, deterministic; a rerun was byte-identical), all through `analyze_recording`. Configurations: trim, DC removal, moving-average detrend, HP 10–150 Hz (zero-phase/causal, order 2/4), gain, peak/RMS normalisation, upward compression, leave-one-recording-out EQ, and combinations.
+  - **Detection:** 0/5 inhalations matched (IoU ≥ 0.2) and 0 Inhale windows inside any inhalation, in every configuration.
+  - **False positives:** 0 Inhale events, including the silent baseline.
+  - **Least bad:** `hp20_eqloo_rms-14`, max P(Inhale) inside 0.193.
+  - **Side effect:** raising the level labels the estimated exhalations Drug (up to 170 windows).
+  - **Reference safety:** HP 20/50/80 Hz and `hp20_rms-14` keep 40 reference recordings at 42/42 matched inhalations.
+- **Feature diagnostics (V, outside the production path; modified tensors fed to the unchanged ONNX):**
+  - **Hardware → reference:** hardware MFCC-0 drops reference inhale windows from 0.99 to 0.00 (to 0.93 after HP 20 Hz + RMS normalisation). Hardware MFCC 1–12 drops them to 0.03 before and after. Deltas, centroid, flatness, rolloff and ZCR have no effect (≥ 0.98).
+  - **Reference → hardware:** reference MFCC 1–39 lifts processed hardware inhale windows to 0.92.
+  - **Conclusion:** the decisive mismatch is the spectral envelope, and no tested global filter or gain corrects it.
+
+## Files changed
+- **New:** `experiments/audio_compatibility/**`, comprising:
+  - scripts, CSV/JSON/MD results and plots;
+  - `transformed_audio/` with 165 WAVs (about 25 MB, including 2 from testing `reproduce_best.py`).
+- **Changed:** this log.
+- **Unchanged:** originals, `assets/ml/`, the research model and `src/`, app `pipeline/`/`services/`/`screens/`, firmware.
+
+## Tests (command and outcome)
+- `bash experiments/audio_compatibility/scripts/run_all.sh` (end-to-end reproduction, about 15 min) → exit 0. `experiment_results.csv`, `baseline_results.csv`, `feature_ablation.csv` and `reference_transform_check.csv` are byte-identical to the first run. App = Python on 6 originals + 12 transformed files (max |Δp| 8e-7).
+- **No production code changed;** `npm test` was not re-run for this entry.
+
+## Open issues / next step
+- **Annotations:** estimated without listening. 142744 and 142823 have a plausible alternative actuation/inhale split; no conclusion depends on it.
+- **Tone test:** confirm the physical rate and over-range behaviour (wrap vs clip).
+- **Placement test:** record annotated inhalations with the INMP441 mounted on the inhaler, as in the reference setup.
+- **If still incompatible:** detection needs PRISM-hardware training data. That is a research decision outside these constraints.
+- **Do not commit `transformed_audio/` (25 MB) without deciding to.** The repo is public, and the recordings are the user's.
+
+# Entry 18 — 2026-10-16: On-board recording over BLE (ESP32 + INMP441), Stage 9 assessment, V3 status, UI
+
+## Objective
+Make the app's primary action an actual recording with the ESP32 + INMP441 over BLE, processed by the
+existing pipeline (unchanged V2 contract). Add the research Stage 9 assessment, and handle V3
+personalisation safely. Persist, sync and display the results with integrity checks and real failure
+states. Keep demo and simulation as separate, labelled actions.
+
+## What was inspected / changed
+**Inspected:**
+- the app;
+- research `prism_assessment.py` (Stage 9), `personal_reference.py` and its README/contract (V3), `ARCHITECTURE.md` §9.4–9.8;
+- the serial firmware and `record_audio.py` (`C:\CAPSTONE\hardware`, read only);
+- the installed Arduino ESP32 core 3.3.12 (Bluedroid BLE).
+
+**Firmware** (`firmware/`, new):
+- `prism_ble_recorder/` streams 8 kHz audio while recording:
+  - sequenced 12-byte-header packets;
+  - a 5.4 s RAM ring for resends;
+  - CRC-32 over the recording;
+  - capture checks in META.
+  - Live streaming because only about 118 KB of heap can be allocated with Bluedroid (measured), less than a 10 s buffer needs.
+- `i2s_alignment_check/` finds which bits of the 32-bit I2S slot hold the sample.
+- `tools/ble_record.py` is a PC reference client.
+- Documentation: `PROTOCOL.md` and `README.md`.
+
+**Phone:**
+- `services/ble/`: `protocol.js`, `AudioReassembler.js`, `PrismRecorder.js`, `bleTransport.js` (react-native-ble-plx 3.5.1) and the test-only simulator `testing/fakePrismDevice.js`.
+- `pipeline/sources/BlePcmSource.js` produces float32 = int16 / 32768 with input_domain `prism_hardware`.
+- `services/recordingWorkflow.js` runs the lifecycle IDLE→CONNECTING→READY→RECORDING→TRANSFERRING→ANALYSING→COMPLETED/ERROR.
+- `services/hardwareSession.js` builds the session record:
+  - the V2 output, unchanged, under `recordings`;
+  - Stage 9 under `assessments`;
+  - V3 state under `personal`;
+  - device, transfer and capture checks under `capture`.
+- `services/audioFiles.js` keeps the raw WAV on the phone only.
+
+**Stage 9:**
+- `pipeline/ReferenceAssessment.js` ports `assess_event`/`assess_recording`/`validate_assessment_output`.
+- The reference is copied verbatim to `assets/ml/final_assessment/` (SHA-256 `32ada36c…` = contract).
+- Demo sessions now carry it too.
+
+**V3:**
+- `pipeline/PersonalReferenceStatus.js` ports the sitting and warm-up rules.
+- Status is always UNAVAILABLE, with blockers:
+  - not validated;
+  - sitting definition incompatible: 10 scoreable inhalations per 25-min sitting against 1–2 in real use;
+  - no hardware reference.
+- The baseline update rule is not ported and no personal deviation is computed.
+
+**UI:**
+- **Dashboard:** recording panel with the lifecycle and real progress; the device banner; a Personal baseline card; a "Demo and test" section.
+- **Device screen:** real scan, connect, identify and disconnect, showing device information. The fake battery and fake devices are removed.
+- **Session detail:** the real waveform from the local WAV, a capture/integrity card, and a collapsed "Research measurements" section.
+- **History:** 14-day trends of stored sessions.
+- **Settings:** recording length 5/10/15 s; vibration on result; local audio size. The dead reminder switches are replaced by "not available".
+
+**Config:**
+- `react-native-ble-plx@3.5.1` (exact);
+- `app.json` plugin entry with `neverForLocation`;
+- the same permissions in the git-ignored generated `AndroidManifest.xml`.
+
+**Display rule decision:**
+- The user asked to show the "acoustic deviation score", which conflicts with CLAUDE.md §4 and research §9.4.
+- It is shown only in the separate, collapsed Research measurements section, in the research wording ("acoustically within / outside the range of the reference recordings").
+- It comes with the PRISM-hardware caveat and without NORMAL/ANOMALY, GOOD/POOR, %, quality or clinical wording.
+- The UI scan in `utils/test_session_view.js` exempts only the word "deviation" in its two files.
+
+## Results (V = run; O = read in code; N = not verified)
+**I2S alignment (V, hardware, `firmware/i2s_alignment_check/RESULT_2026-10-16.txt`):**
+- Philips framing (`bit_shift = true`, used by `ESP_I2S` and the serial sketch): bits 31..9 toggle and bit 8 is always 0. The sample is read one SCK late, so the sign is lost and values are doubled.
+- MSB framing: bits 31..8 toggle and bit 31 equals bit 30.
+- The recorder uses `bit_shift = false`.
+- **Correction to Entries 12–17 (they stay unchanged):**
+  - The serial recordings in `C:\CAPSTONE\hardware\recordingds` were captured with Philips framing, so their int16 values are doubled. Their level is therefore about 6 dB below what those entries stated: about 33 dB, not 27 dB, below the reference inhalations.
+  - The "wraparound" in `_142806` is this framing effect: the loss of the sign bit, not a mic overflow.
+  - The conclusions of Entry 17 (spectral shape mismatch, 0/5 detections) do not depend on level.
+
+**BLE, PC (V):**
+- 10 s recordings: 690/690 packets, CRC match.
+- With every 7th packet dropped on purpose: 114 live gap requests, CRC match.
+- A 4 s recording with drops was recovered after the recording.
+- Measured capture rate 7996.8–8022.3 Hz (±0.3 % resolution).
+- 0 DMA overflows, 0 ring overruns.
+- Start-up DC transient gone: first-0.5 s mean +6/−52 against −6067 serial.
+
+**Phone + ESP32 (V, OnePlus IV2201, Android 13, debug APK with embedded bundle):**
+- **Permissions:** the "Nearby devices" prompt was answered on the phone; BLUETOOTH_SCAN and BLUETOOTH_CONNECT are granted.
+- **Recordings:** five recordings (four of 10 s, one of 5 s) all verified: CRC phone = device, 690 (345) packets, 0 overflows, 0 clipping, alignment check passed.
+  - Each took 10.4 s (5.4 s) from start to verified.
+  - All NO_INHALATION_DETECTED (room sound), stored and synced to Firestore.
+  - WAVs of 160,044 bytes are kept in app storage.
+- **Settle fix:**
+  - Run 1 needed 1 resend round: on Android the READY status overtook the last packets.
+  - Fixed with a settle wait plus a regression test.
+  - Runs 2–5 needed 0 rounds.
+- **Parity on the phone's own data:**
+  - The 4 kept WAVs have the device's CRC (mic → phone file bit-exact).
+  - The research Python `assess_recording(..., input_domain="prism_hardware")` gives the same status and events (NO_INHALATION_DETECTED, 0) for all 4.
+- **Stage 9 on the phone:**
+  - Demo `rec2018-02-05_10h58m35.817s.wav` vs Python `prism_assessment.py`: every categorical field and the reason text are identical, the tail probability is exact, and the deviation differs by 2.2e-7.
+  - Shown in Research measurements: 1.10, within, stable, 121 of 318.
+- **Failure paths:**
+  - ESP32 reset during scan → "Connect failed — No PRISM device was found nearby".
+  - ESP32 reset 3 s into a recording → "Record failed — The connection to the PRISM device was lost", "Nothing was saved" (no session, no file), with "Connect device".
+  - Reconnect, then record → success.
+- **Other paths:**
+  - Scan list (PRISM-4F42, −40 dBm) → connect.
+  - Identify: delivered; the LED blink was N.
+  - Remembered device: auto-reconnect after a cold start.
+  - The simulated session still works.
+  - Settings 5 s → 40,000 samples.
+  - Final cold start: 20 sessions, all synced, the 13 pre-existing ones byte-identical, 0 JS errors, 0 FATAL.
+
+**N:**
+- Real inhalations from this hardware: the detector found none, consistent with Entry 17.
+- Bluetooth-off and permission-denied UI on the phone: code paths tested in Node only, because toggling them is a device-wide or permission change.
+- Offline sync of a BLE session on the phone: the sync code is unchanged and was verified offline in Entry 7; BLE records were synced online on the phone and offline/online in Node.
+- Long-range and long-session behaviour.
+
+## Files changed
+**New:**
+- `firmware/**`;
+- `services/ble/**`, `services/{recordingWorkflow,hardwareSession,audioFiles,sessionWaveform,test_ble}.js`;
+- `pipeline/{ReferenceAssessment,PersonalReferenceStatus,test_assessment}.js`, `pipeline/sources/BlePcmSource.js`;
+- `utils/{recordingView,captureView,researchView,trendsView,test_recording_view}.js`;
+- `components/{RecordingPanel,CaptureCard,ResearchMeasurements,TrendsCard}.js`;
+- `assets/ml/final_assessment/**` and `assets/ml/personal_reference/{personal_contract_v3,personal_reference_config_v3}.json` (verbatim).
+
+**Changed:**
+- `services/{bleService,sessionRecord,storageService,demoSession,test_sessions}.js`;
+- `pipeline/{wav,contractAssets}.js`;
+- `context/AppContext.js`, `App.js`;
+- `screens/*.js`;
+- `utils/{sessionView,test_session_view}.js`;
+- `package.json` (dependency, test script), `package-lock.json`, `app.json`;
+- `android/app/src/main/AndroidManifest.xml` (git-ignored).
+
+**Unchanged:**
+- the ONNX model, the V2 baseline/contract/golden files;
+- `InferencePipeline`, DSP, `FeatureExtractor`, scoring;
+- `components/IssueList.js`, `components/ProgressBar.js`;
+- `firebase/config.js`;
+- the research repo and `C:\CAPSTONE\hardware`.
+
+## Tests (command and outcome)
+`PRISM_REQUIRE_DATASET=1 npm test`, before and after.
+
+| Test file | Before | After |
+|---|---|---|
+| harness | all passed | all passed |
+| contract | 446 | 446 |
+| assessment (new) | — | 503 |
+| sessions | 149 | 150 |
+| ble (new) | — | 102 |
+| session view | 255 | 264 |
+| recording view (new) | — | 67 |
+
+All pass with 0 skipped. `gradlew :app:assembleDebug` (JDK 17) → BUILD SUCCESSFUL; the APK has the BLE permissions and the new bundle.
+
+## Open issues / next step
+- **Hardware reference study:** record annotated inhalations with the INMP441 in its final placement, using this firmware. Detection and the Stage 9 reference are not validated for this microphone.
+- **V3 personalisation:** needs a new sitting definition and a validation study before anything personal is shown.
+- **Firmware:** the ESP32 runs the BLE recorder; the original serial sketch can be re-uploaded (see `firmware/README.md`).
+- **Not committed:** nothing is committed. `experiments/` and `PRISM_AUTONOMOUS_PROGRESS.md` stay untracked.
