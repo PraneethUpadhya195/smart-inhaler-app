@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState } from "react";
 import {
   View,
   Text,
@@ -11,173 +11,188 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { useAppContext } from "../context/AppContext";
 import * as bleService from "../services/bleService";
-import * as deviceService from "../services/deviceService";
-import * as storageService from "../services/storageService";
+import { ERROR_TEXT } from "../utils/recordingView";
 import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
 
+/**
+ * DeviceScreen — the PRISM recorder (ESP32 + INMP441) over Bluetooth Low Energy: scan, connect,
+ * disconnect, identify (blinks the device's LED) and the information the device reports.
+ * Everything shown comes from the device; the hardware reports no battery level, so none is shown.
+ */
 export default function DeviceScreen() {
-  const {
-    userId,
-    deviceStatus,
-    deviceId,
-    deviceName,
-    batteryLevel,
-    setDeviceConnected,
-    setDeviceDisconnected,
-  } = useAppContext();
-
-  const [isConnecting, setIsConnecting] = useState(false);
+  const { deviceStatus, deviceInfo, connectDevice, disconnectDevice, recordingState } = useAppContext();
+  const [scanning, setScanning] = useState(false);
+  const [found, setFound] = useState(null); // null: not scanned yet
+  const [busyId, setBusyId] = useState(null);
   const [isDisconnecting, setIsDisconnecting] = useState(false);
-  const [isBeeping, setIsBeeping] = useState(false);
-
-  const unsubscribeRef = useRef(null);
+  const [isIdentifying, setIsIdentifying] = useState(false);
+  const [error, setError] = useState(null);
 
   const isConnected = deviceStatus === "Connected";
+  const recordingActive = !["IDLE", "COMPLETED", "ERROR"].includes(recordingState.phase);
 
-  // ─── Connect ───────────────────────────────────────────────────────────────
+  const describeError = (e) => (e?.code && ERROR_TEXT[e.code] ? `${ERROR_TEXT[e.code]} ${e.message ?? ""}`.trim() : e?.message ?? String(e));
 
-  async function handleConnect() {
-    setIsConnecting(true);
+  async function handleScan() {
+    setScanning(true);
+    setError(null);
+    setFound([]);
     try {
-      const { deviceId: id, deviceName: name, batteryLevel: battery } =
-        await bleService.connectToDevice();
-
-      // Remember the device on this phone (AsyncStorage). Register it in Firestore in the
-      // background: Firestore confirms writes only when online, so the UI does not wait for it.
-      await storageService.saveLastDevice({ deviceId: id, deviceName: name });
-      if (userId) {
-        deviceService.saveDevice(userId, { deviceId: id, name })
-          .catch((err) => console.warn("[DeviceScreen] Device not registered in Firestore:", err?.message ?? err));
-      }
-
-      // Update context
-      setDeviceConnected({ deviceId: id, deviceName: name, batteryLevel: battery });
-
-      // No BLE audio source exists yet, so no session is created from the (simulated) device.
-      unsubscribeRef.current = bleService.subscribeToInhalationEvents(() => {});
+      const devices = await bleService.scanForDevices({ timeoutMs: 6000, onUpdate: setFound });
+      setFound(devices);
     } catch (e) {
-      Alert.alert("Connection Failed", "Could not connect to device. Please try again.");
-      console.error("[DeviceScreen] Connect error:", e);
+      setError(describeError(e));
     } finally {
-      setIsConnecting(false);
+      setScanning(false);
     }
   }
 
-  // ─── Disconnect ────────────────────────────────────────────────────────────
+  async function handleConnect(bleId) {
+    setBusyId(bleId ?? "any");
+    setError(null);
+    try {
+      await connectDevice(bleId);
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   async function handleDisconnect() {
     setIsDisconnecting(true);
     try {
-      // Cancel pending event subscription
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current();
-        unsubscribeRef.current = null;
-      }
-
-      await bleService.disconnectDevice();
-      if (deviceId && userId) {
-        // Background Firestore update (not awaited, see handleConnect)
-        deviceService.markDeviceInactive(userId, deviceId)
-          .catch((err) => console.warn("[DeviceScreen] Device state not updated in Firestore:", err?.message ?? err));
-      }
-
-      setDeviceDisconnected();
+      await disconnectDevice();
     } catch (e) {
-      Alert.alert("Error", "Failed to disconnect cleanly.");
-      console.error("[DeviceScreen] Disconnect error:", e);
+      setError(describeError(e));
     } finally {
       setIsDisconnecting(false);
     }
   }
 
-  // ─── Beep ──────────────────────────────────────────────────────────────────
-
-  async function handleBeep() {
-    setIsBeeping(true);
+  async function handleIdentify() {
+    setIsIdentifying(true);
     try {
-      await bleService.triggerBeep();
-      Alert.alert("Find Inhaler", "Beep sent to device! 🔔");
+      await bleService.identifyDevice();
+      Alert.alert("Identify device", "The device's blue LED blinks for 3 seconds.");
+    } catch (e) {
+      setError(describeError(e));
     } finally {
-      setIsBeeping(false);
+      setIsIdentifying(false);
     }
   }
 
-  // ─── Render ────────────────────────────────────────────────────────────────
+  const statusColor = isConnected ? COLORS.success : deviceStatus === "Connecting" ? COLORS.primary : COLORS.textMuted;
 
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={styles.content}
-      showsVerticalScrollIndicator={false}
-    >
+    <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       {/* Status Card */}
       <View style={[styles.statusCard, SHADOW.card, { borderColor: isConnected ? COLORS.success : COLORS.border }]}>
-        <View style={[styles.statusIndicator, { backgroundColor: isConnected ? COLORS.success : COLORS.textMuted }]} />
+        <View style={[styles.statusIndicator, { backgroundColor: statusColor }]} />
         <View style={styles.statusText}>
-          <Text style={[styles.statusLabel, { color: isConnected ? COLORS.success : COLORS.textMuted }]}>
-            {deviceStatus}
-          </Text>
-          {isConnected && deviceName && (
-            <Text style={styles.deviceNameText}>{deviceName}</Text>
-          )}
-          {isConnected && deviceId && (
-            <Text style={styles.deviceIdText}>{deviceId}</Text>
-          )}
+          <Text style={[styles.statusLabel, { color: statusColor }]}>{deviceStatus}</Text>
+          {isConnected && deviceInfo?.name && <Text style={styles.deviceNameText}>{deviceInfo.name}</Text>}
+          {isConnected && deviceInfo?.deviceId && <Text style={styles.deviceIdText}>{deviceInfo.deviceId}</Text>}
         </View>
-        {isConnected && batteryLevel != null && (
-          <View style={styles.batteryContainer}>
-            <Ionicons name="battery-half-outline" size={20} color={batteryLevelColor(batteryLevel)} />
-            <Text style={[styles.batteryText, { color: batteryLevelColor(batteryLevel) }]}>
-              {batteryLevel}%
-            </Text>
-          </View>
-        )}
+        {deviceStatus === "Connecting" && <ActivityIndicator color={COLORS.primary} />}
       </View>
 
-      {/* Info row when connected */}
-      {isConnected && (
-        <View style={[styles.infoCard, SHADOW.card]}>
-          <InfoRow icon="pulse-outline" label="Listening for inhalation events…" />
-          <InfoRow icon="cloud-upload-outline" label="Sessions auto-save to Firestore" />
+      {error && (
+        <View style={styles.errorCard}>
+          <Ionicons name="alert-circle-outline" size={18} color={COLORS.danger} />
+          <Text style={styles.errorText}>{error}</Text>
         </View>
       )}
 
-      {/* Action Buttons */}
+      {/* Device information (as reported by the device) */}
+      {isConnected && deviceInfo && (
+        <View style={[styles.infoCard, SHADOW.card]}>
+          <InfoRow icon="hardware-chip-outline" label="Firmware" value={deviceInfo.firmware ?? "—"} />
+          <InfoRow icon="mic-outline" label="Microphone" value={deviceInfo.microphone ?? "—"} />
+          <InfoRow icon="pulse-outline" label="Sample rate" value={`${deviceInfo.sampleRate} Hz`} />
+          <InfoRow icon="time-outline" label="Recording length" value={`${(deviceInfo.defaultSamples / deviceInfo.sampleRate).toFixed(0)} s default, up to ${deviceInfo.maxSamples ? (deviceInfo.maxSamples / deviceInfo.sampleRate).toFixed(0) : "?"} s`} />
+          <InfoRow icon="swap-horizontal-outline" label="Link" value={`Protocol v${deviceInfo.protocol}, ${deviceInfo.mtu}-byte messages`} />
+          <InfoRow icon="layers-outline" label="Resend buffer" value={deviceInfo.ringSamples ? `${(deviceInfo.ringSamples / deviceInfo.sampleRate).toFixed(1)} s of audio` : "—"} />
+          <InfoRow icon="battery-dead-outline" label="Battery" value="Not measured by this hardware" />
+        </View>
+      )}
+
+      {/* Actions */}
       <View style={styles.buttonGroup}>
-        {!isConnected ? (
-          <ActionButton
-            icon="bluetooth"
-            label="Connect Device"
-            color={COLORS.primary}
-            loading={isConnecting}
-            onPress={handleConnect}
-          />
+        {isConnected ? (
+          <>
+            <ActionButton
+              icon="flashlight-outline"
+              label="Identify device (blink LED)"
+              color={COLORS.warning}
+              loading={isIdentifying}
+              disabled={recordingActive}
+              onPress={handleIdentify}
+            />
+            <ActionButton
+              icon="bluetooth-outline"
+              label="Disconnect device"
+              color={COLORS.danger}
+              loading={isDisconnecting}
+              disabled={recordingActive}
+              onPress={handleDisconnect}
+            />
+          </>
         ) : (
           <>
             <ActionButton
-              icon="bluetooth-outline"
-              label="Disconnect Device"
-              color={COLORS.danger}
-              loading={isDisconnecting}
-              onPress={handleDisconnect}
+              icon="search-outline"
+              label={scanning ? "Scanning…" : "Scan for PRISM devices"}
+              color={COLORS.primary}
+              loading={scanning}
+              disabled={busyId !== null}
+              onPress={handleScan}
             />
             <ActionButton
-              icon="volume-high-outline"
-              label="Find Inhaler"
-              color={COLORS.warning}
-              loading={isBeeping}
-              onPress={handleBeep}
+              icon="bluetooth"
+              label="Connect to the nearest device"
+              color={COLORS.primary}
+              loading={busyId === "any"}
+              disabled={scanning || busyId !== null}
+              onPress={() => handleConnect(null)}
             />
           </>
         )}
       </View>
 
-      {/* BLE note */}
+      {/* Scan results */}
+      {!isConnected && found !== null && (
+        <View style={[styles.infoCard, SHADOW.card]}>
+          <Text style={styles.sectionTitle}>Devices found</Text>
+          {found.length === 0 && !scanning && (
+            <Text style={styles.noteText}>No PRISM device found. Check that it is powered and within a few metres.</Text>
+          )}
+          {found.map((d) => (
+            <TouchableOpacity
+              key={d.id}
+              style={styles.deviceRow}
+              onPress={() => handleConnect(d.id)}
+              disabled={busyId !== null}
+              activeOpacity={0.75}
+            >
+              <Ionicons name="hardware-chip-outline" size={18} color={COLORS.primary} />
+              <View style={styles.deviceRowText}>
+                <Text style={styles.deviceRowName}>{d.name ?? "PRISM device"}</Text>
+                <Text style={styles.deviceIdText}>{d.id}{d.rssi !== null ? ` · signal ${d.rssi} dBm` : ""}</Text>
+              </View>
+              {busyId === d.id ? <ActivityIndicator color={COLORS.primary} /> : <Text style={styles.connectText}>Connect</Text>}
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
+
+      {/* About the connection */}
       <View style={styles.noteCard}>
         <Ionicons name="information-circle-outline" size={16} color={COLORS.textMuted} />
         <Text style={styles.noteText}>
-          BLE is currently simulated. Replace <Text style={styles.codeText}>bleService.js</Text> with{" "}
-          <Text style={styles.codeText}>react-native-ble-plx</Text> to connect real hardware.
+          The PRISM device records 8 kHz audio with its INMP441 microphone when you start a recording and sends it to
+          this phone over Bluetooth Low Energy. The phone checks that every sample arrived (sample count and checksum)
+          before analysing it. Android asks once for the "Nearby devices" permission.
         </Text>
       </View>
     </ScrollView>
@@ -186,37 +201,28 @@ export default function DeviceScreen() {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-function ActionButton({ icon, label, color, loading, onPress }) {
+function ActionButton({ icon, label, color, loading, disabled = false, onPress }) {
   return (
     <TouchableOpacity
-      style={[styles.actionBtn, { backgroundColor: color + "18", borderColor: color }]}
+      style={[styles.actionBtn, { backgroundColor: color + "18", borderColor: color }, (disabled || loading) && styles.disabled]}
       onPress={onPress}
-      disabled={loading}
+      disabled={disabled || loading}
       activeOpacity={0.75}
     >
-      {loading ? (
-        <ActivityIndicator color={color} />
-      ) : (
-        <Ionicons name={icon} size={22} color={color} />
-      )}
+      {loading ? <ActivityIndicator color={color} /> : <Ionicons name={icon} size={22} color={color} />}
       <Text style={[styles.actionBtnText, { color }]}>{label}</Text>
     </TouchableOpacity>
   );
 }
 
-function InfoRow({ icon, label }) {
+function InfoRow({ icon, label, value }) {
   return (
     <View style={styles.infoRow}>
       <Ionicons name={icon} size={15} color={COLORS.primary} />
-      <Text style={styles.infoText}>{label}</Text>
+      <Text style={styles.infoLabel}>{label}</Text>
+      <Text style={styles.infoValue}>{value}</Text>
     </View>
   );
-}
-
-function batteryLevelColor(level) {
-  if (level > 60) return COLORS.success;
-  if (level > 30) return COLORS.warning;
-  return COLORS.danger;
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
@@ -234,18 +240,23 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: SPACING.md,
   },
-  statusIndicator: {
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-  },
+  statusIndicator: { width: 14, height: 14, borderRadius: 7 },
   statusText: { flex: 1 },
   statusLabel: { fontSize: 18, fontWeight: "700" },
   deviceNameText: { fontSize: 14, color: COLORS.textSecondary, marginTop: 2 },
   deviceIdText: { fontSize: 11, color: COLORS.textMuted, fontFamily: "monospace", marginTop: 1 },
 
-  batteryContainer: { alignItems: "center", gap: 2 },
-  batteryText: { fontSize: 12, fontWeight: "600" },
+  errorCard: {
+    flexDirection: "row",
+    gap: SPACING.sm,
+    alignItems: "flex-start",
+    backgroundColor: COLORS.danger + "18",
+    borderColor: COLORS.danger + "60",
+    borderWidth: 1,
+    borderRadius: RADIUS.md,
+    padding: SPACING.md,
+  },
+  errorText: { flex: 1, color: COLORS.danger, fontSize: 13, lineHeight: 19 },
 
   infoCard: {
     backgroundColor: COLORS.surface,
@@ -255,8 +266,28 @@ const styles = StyleSheet.create({
     padding: SPACING.md,
     gap: SPACING.sm,
   },
+  sectionTitle: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: COLORS.textMuted,
+    textTransform: "uppercase",
+    letterSpacing: 1,
+  },
   infoRow: { flexDirection: "row", alignItems: "center", gap: SPACING.sm },
-  infoText: { fontSize: 13, color: COLORS.textSecondary },
+  infoLabel: { fontSize: 13, color: COLORS.textSecondary, width: 120 },
+  infoValue: { flex: 1, fontSize: 13, color: COLORS.text, textAlign: "right" },
+
+  deviceRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: SPACING.sm,
+    paddingVertical: SPACING.sm,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+  },
+  deviceRowText: { flex: 1 },
+  deviceRowName: { fontSize: 15, fontWeight: "600", color: COLORS.text },
+  connectText: { color: COLORS.primary, fontWeight: "700" },
 
   buttonGroup: { gap: SPACING.sm },
   actionBtn: {
@@ -267,6 +298,7 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     padding: SPACING.md,
   },
+  disabled: { opacity: 0.5 },
   actionBtnText: { fontSize: 16, fontWeight: "600" },
 
   noteCard: {
@@ -278,5 +310,4 @@ const styles = StyleSheet.create({
     alignItems: "flex-start",
   },
   noteText: { flex: 1, fontSize: 12, color: COLORS.textMuted, lineHeight: 18 },
-  codeText: { fontFamily: "monospace", color: COLORS.primaryLight },
 });

@@ -238,9 +238,16 @@ const FORBIDDEN_IN_UI = [
   /(?<!counts)\.recordings\b/, // raw contract outputs (view.counts.recordings is a count)
   /feature_values|window_count/,
 ];
+// The research measurements section shows the Stage 9 acoustic deviation on explicit request of the
+// project owner (research ARCHITECTURE.md §9.4 wording, collapsed, separate from the session status).
+// Only its two files may use the term "deviation"; every other rule applies to them too, and
+// utils/test_recording_view.js checks their wording.
+const RESEARCH_UI = new Set(["utils/researchView.js", "components/ResearchMeasurements.js"]);
+check([...RESEARCH_UI].every((f) => uiFiles.includes(f)), "the research measurements files are scanned");
 for (const rel of uiFiles) {
   const src = stripComments(fs.readFileSync(path.join(ROOT, rel), "utf8"));
-  const hits = FORBIDDEN_IN_UI.filter((re) => re.test(src)).map(String);
+  const rules = RESEARCH_UI.has(rel) ? FORBIDDEN_IN_UI.filter((re) => String(re) !== "/deviation/i") : FORBIDDEN_IN_UI;
+  const hits = rules.filter((re) => re.test(src)).map(String);
   check(hits.length === 0, `${rel}: no forbidden field, label or helper (${hits.join(", ")})`);
 }
 for (const rel of ["screens/DashboardScreen.js", "screens/SessionDetailScreen.js", "components/SessionCard.js"]) {

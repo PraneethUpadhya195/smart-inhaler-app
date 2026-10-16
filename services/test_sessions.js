@@ -20,6 +20,7 @@ import SessionAggregator from "../pipeline/SessionAggregator.js";
 // Loaded before the fake-firebase resolve hook below is registered (it rewrites relative imports).
 import { createNodePipeline } from "../pipeline/runtime/node.js";
 import WavPcmSource from "../pipeline/sources/WavPcmSource.js";
+import { assessRecording } from "../pipeline/ReferenceAssessment.js";
 import * as demo from "./demoSession.js";
 import { buildSessionRecord, assertFirestoreSafe } from "./sessionRecord.js";
 import { createLocalSessionStore, SESSION_KEY_PREFIX, LocalStoreError } from "./localSessionStore.js";
@@ -655,6 +656,10 @@ await test("15. Demo sessions: bundled recordings, real pipeline output, stored 
   check(record.recordings[0].input.input_domain === "reference_dataset" && record.recordings[0].baseline_domain_validated === true,
     "input domain is the reference dataset");
   check(record.session_status !== "PROCESSING_ERROR", `the pipeline ran (${record.session_status})`);
+  const stage9 = await assessRecording(pipeline, direct, await new WavPcmSource(bytes, { inputDomain: "reference_dataset",
+    sourceId: recording.recordingId }).acquire());
+  check(Array.isArray(record.assessments) && record.assessments.length === 1 && json(record.assessments[0]) === json(stage9)
+    && record.assessments[0].baseline_domain_validated === true, "the Stage 9 assessment is stored separately, as computed directly");
   assertFirestoreSafe(record);
 
   check(demo.demoRecordingOf(record) === recording, "a demo session is traced back to its bundled recording");

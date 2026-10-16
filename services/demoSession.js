@@ -1,6 +1,7 @@
 import SessionAggregator from '../pipeline/SessionAggregator.js';
 import WavPcmSource from '../pipeline/sources/WavPcmSource.js';
 import { decodeWav } from '../pipeline/wav.js';
+import { assessRecording } from '../pipeline/ReferenceAssessment.js';
 import { buildSessionRecord } from './sessionRecord.js';
 
 /**
@@ -53,15 +54,25 @@ export async function analyseDemoRecording(getPipeline, recording, bytes, { now 
   const source = new WavPcmSource(bytes, { inputDomain: 'reference_dataset', sourceId: recording.recordingId });
   const outputs = [];
   const processingErrors = [];
+  let assessments;
   try {
     const pipeline = await getPipeline();
-    outputs.push(await pipeline.run(source));
+    const pcm = await source.acquire();
+    const inference = await pipeline.run({ acquire: async () => pcm });
+    outputs.push(inference);
+    // Stage 9 (prism-assessment-v1.0), kept separately; the V2 output above is unchanged.
+    try {
+      assessments = [await assessRecording(pipeline, inference, inference.recording_status === 'INPUT_ERROR' ? null : pcm)];
+    } catch (e) {
+      console.warn(`[demoSession] Stage 9 assessment not computed: ${e?.message ?? e}`);
+      assessments = null;
+    }
   } catch (e) {
     // The pipeline could not run (e.g. model or runtime failure). Recorded as such, not as a result.
     processingErrors.push({ recording_id: recording.recordingId, message: e?.message ?? String(e) });
   }
   const session = new SessionAggregator().aggregate(`demo_sess_${now()}`, outputs, { processingErrors });
-  return buildSessionRecord(session, { source: 'wav', simulated: false, note: demoNote(recording.recordingId) });
+  return buildSessionRecord(session, { source: 'wav', simulated: false, note: demoNote(recording.recordingId), assessments });
 }
 
 /**

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   View,
   Text,
@@ -8,16 +8,21 @@ import {
   TouchableOpacity,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { useAppContext } from "../context/AppContext";
+import { useAppContext, RECORDING_SECONDS_CHOICES } from "../context/AppContext";
+import { localAudioSummary } from "../services/audioFiles";
+import { PRISM_BLE } from "../services/ble/protocol";
 import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
 
 export default function SettingsScreen() {
-  const { userId } = useAppContext();
-
-  const [remindersEnabled, setRemindersEnabled] = useState(false);
-  const [morningReminder, setMorningReminder] = useState(true);
-  const [eveningReminder, setEveningReminder] = useState(true);
-  const [vibrationEnabled, setVibrationEnabled] = useState(true);
+  const { userId, settings, updateSettings, deviceStatus, deviceInfo } = useAppContext();
+  const [audio, setAudio] = useState(null);
+  useEffect(() => {
+    try {
+      setAudio(localAudioSummary());
+    } catch (e) {
+      console.warn("[Settings] local audio not listed:", e?.message ?? e);
+    }
+  }, []);
 
   return (
     <ScrollView
@@ -25,42 +30,49 @@ export default function SettingsScreen() {
       contentContainerStyle={styles.content}
       showsVerticalScrollIndicator={false}
     >
-      {/* Reminders Section */}
-      <SectionHeader title="Reminders" icon="notifications-outline" />
+      {/* Recording */}
+      <SectionHeader title="Recording" icon="mic-outline" />
       <View style={[styles.card, SHADOW.card]}>
-        <SettingRow
-          label="Enable Reminders"
-          description="Get notified when it's time for your dose"
-          value={remindersEnabled}
-          onValueChange={setRemindersEnabled}
-        />
+        <View style={styles.settingRow}>
+          <View style={styles.settingText}>
+            <Text style={styles.settingLabel}>Recording length</Text>
+            <Text style={styles.settingDescription}>How long the PRISM device records after you press the button</Text>
+          </View>
+        </View>
+        <View style={styles.choiceRow}>
+          {RECORDING_SECONDS_CHOICES.map((s) => (
+            <TouchableOpacity
+              key={s}
+              style={[styles.choice, settings.recordingSeconds === s && styles.choiceSelected]}
+              onPress={() => updateSettings({ recordingSeconds: s })}
+              activeOpacity={0.8}
+            >
+              <Text style={[styles.choiceText, settings.recordingSeconds === s && styles.choiceTextSelected]}>{s} s</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
         <View style={styles.divider} />
-        <SettingRow
-          label="Morning Dose"
-          description="Reminder at 8:00 AM"
-          value={morningReminder}
-          onValueChange={setMorningReminder}
-          disabled={!remindersEnabled}
-        />
-        <View style={styles.divider} />
-        <SettingRow
-          label="Evening Dose"
-          description="Reminder at 8:00 PM"
-          value={eveningReminder}
-          onValueChange={setEveningReminder}
-          disabled={!remindersEnabled}
-        />
-      </View>
-
-      {/* Feedback Section */}
-      <SectionHeader title="Device Feedback" icon="hardware-chip-outline" />
-      <View style={[styles.card, SHADOW.card]}>
         <SettingRow
           label="Vibration"
-          description="Vibrate on session complete"
-          value={vibrationEnabled}
-          onValueChange={setVibrationEnabled}
+          description="Vibrate when a recording has been analysed"
+          value={settings.vibrateOnResult}
+          onValueChange={(v) => updateSettings({ vibrateOnResult: v })}
         />
+        <View style={styles.divider} />
+        <PlaceholderRow
+          label="Raw audio on this phone"
+          value={audio ? `${audio.count} recording${audio.count === 1 ? "" : "s"}, ${(audio.bytes / 1024 / 1024).toFixed(1)} MB` : "—"}
+        />
+        <Text style={styles.accountNote}>
+          Recordings from the PRISM device are kept as audio files on this phone only. The cloud receives the analysis
+          results, never the audio.
+        </Text>
+      </View>
+
+      {/* Reminders: not part of this version */}
+      <SectionHeader title="Reminders" icon="notifications-outline" />
+      <View style={[styles.card, SHADOW.card]}>
+        <Text style={[styles.accountNote, styles.noteOnly]}>Reminders are not available in this version of the app.</Text>
       </View>
 
       {/* Account */}
@@ -89,9 +101,20 @@ export default function SettingsScreen() {
       <View style={[styles.card, SHADOW.card]}>
         <PlaceholderRow label="App Version" value="1.0.0-beta" />
         <View style={styles.divider} />
-        <PlaceholderRow label="BLE Protocol" value="Simulated (v0)" />
+        <PlaceholderRow label="BLE Protocol" value={`prism-ble-audio v${PRISM_BLE.PROTOCOL_VERSION}`} />
         <View style={styles.divider} />
-        <PlaceholderRow label="Target Device" value="ESP32 BLE Inhaler" />
+        <PlaceholderRow label="Target Device" value="ESP32 + INMP441 (PRISM recorder)" />
+        <View style={styles.divider} />
+        <PlaceholderRow
+          label="Connected device"
+          value={deviceStatus === "Connected" && deviceInfo ? `${deviceInfo.name ?? deviceInfo.deviceId} · ${deviceInfo.firmware ?? "?"}` : "None"}
+        />
+        <View style={styles.divider} />
+        <PlaceholderRow label="Analysis" value="PRISM V2 contract + Stage 9 reference" />
+        <Text style={styles.accountNote}>
+          The detector and the reference were developed on a research dataset recorded with a different microphone;
+          they are not validated for the PRISM device. Results describe recordings, not health.
+        </Text>
       </View>
 
       <Text style={styles.footer}>Smart Inhaler • Built with Expo + Firebase</Text>
@@ -180,6 +203,19 @@ const styles = StyleSheet.create({
 
   divider: { height: 1, backgroundColor: COLORS.border, marginHorizontal: SPACING.md },
 
+  choiceRow: { flexDirection: "row", gap: SPACING.sm, paddingHorizontal: SPACING.md, paddingBottom: SPACING.md },
+  choice: {
+    flex: 1,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingVertical: SPACING.sm,
+    alignItems: "center",
+  },
+  choiceSelected: { borderColor: COLORS.primary, backgroundColor: COLORS.primary + "22" },
+  choiceText: { color: COLORS.textSecondary, fontSize: 14, fontWeight: "600" },
+  choiceTextSelected: { color: COLORS.primary },
+
   placeholderRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -212,6 +248,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: SPACING.md,
     paddingBottom: SPACING.md,
   },
+
+  noteOnly: { paddingTop: SPACING.md },
 
   footer: { textAlign: "center", color: COLORS.textMuted, fontSize: 12, marginTop: SPACING.md },
 });

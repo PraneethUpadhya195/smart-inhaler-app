@@ -92,3 +92,32 @@ export function decodeWav(input) {
   }
   return { samples, sampleRate: fmt.sampleRate, channels: 1, fileChannels: nch };
 }
+
+/**
+ * 16-bit mono PCM WAV file (44-byte header) from int16 samples: the format the decoder above reads
+ * and the format of the serial recorder's files. Used to keep BLE recordings on the phone.
+ * @param {Int16Array} samples
+ * @param {number} sampleRate
+ * @returns {Uint8Array}
+ */
+export function encodeWav(samples, sampleRate) {
+  const dataBytes = samples.length * 2;
+  const bytes = new Uint8Array(44 + dataBytes);
+  const view = new DataView(bytes.buffer);
+  const ascii = (offset, text) => { for (let i = 0; i < 4; i++) bytes[offset + i] = text.charCodeAt(i); };
+  ascii(0, "RIFF");
+  view.setUint32(4, 36 + dataBytes, true);
+  ascii(8, "WAVE");
+  ascii(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  ascii(36, "data");
+  view.setUint32(40, dataBytes, true);
+  for (let i = 0; i < samples.length; i++) view.setInt16(44 + 2 * i, samples[i], true);
+  return bytes;
+}

@@ -7,9 +7,8 @@ import { AppProvider, useAppContext } from "./context/AppContext";
 import AppNavigator from "./navigation/AppNavigator";
 
 import { ensureSignedIn } from "./services/authService";
-import { getDevice } from "./services/deviceService";
-import { getLastDevice, clearLastDevice } from "./services/storageService";
-import * as bleService from "./services/bleService";
+import { getLastDevice } from "./services/storageService";
+import { reconnectIfPermitted } from "./services/bleService";
 
 import { COLORS } from "./utils/theme";
 
@@ -40,7 +39,7 @@ export default function App() {
 // ─── AppRoot: handles init logic, then renders navigator ──────────────────────
 
 function AppRoot() {
-  const { initUser, loadSessions, requestSync, setDeviceConnected } = useAppContext();
+  const { initUser, loadSessions, requestSync } = useAppContext();
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
@@ -56,7 +55,11 @@ function AppRoot() {
         if (!cancelled) setIsReady(true);
       }
 
-      // 2. Cloud, in the background and best effort. Offline or without Firebase the app keeps
+      // 2. The last PRISM device, in the background: only if Bluetooth permissions were granted
+      //    before (no prompt at start-up); the recorder reports the connection to AppContext.
+      attemptAutoReconnect();
+
+      // 3. Cloud, in the background and best effort. Offline or without Firebase the app keeps
       //    working locally and pending sessions are uploaded by a later sync.
       requestSync("startup");
       // Sign in anonymously (Firebase SDK persists UID via AsyncStorage)
@@ -68,9 +71,6 @@ function AppRoot() {
 
       // Merge the Firestore history into the local one
       await loadSessions(userId);
-
-      // Auto-reconnect: validate saved device against Firestore
-      await attemptAutoReconnect(userId, setDeviceConnected);
     }
 
     initialize();
@@ -113,31 +113,18 @@ function AppRoot() {
 
 // ─── Auto-reconnect helper ────────────────────────────────────────────────────
 
-async function attemptAutoReconnect(userId, setDeviceConnected) {
+/**
+ * Reconnect to the PRISM device used last (its BLE id is kept on this phone). Entries written by
+ * earlier app versions (simulated devices, no BLE id) are ignored. Best effort: failures are logged.
+ */
+async function attemptAutoReconnect() {
   try {
     const saved = await getLastDevice();
-    if (!saved?.deviceId) return;
-
-    // Validate that this device still exists under the current userId in Firestore
-    const deviceDoc = await getDevice(userId, saved.deviceId);
-    if (!deviceDoc) {
-      // Stale — clear the saved device
-      await clearLastDevice();
-      console.log("[App] Saved device not found in Firestore — cleared AsyncStorage entry.");
-      return;
-    }
-
-    // Simulate BLE reconnect
-    const result = await bleService.connectToDevice(saved.deviceId);
-    setDeviceConnected({
-      deviceId: result.deviceId,
-      deviceName: saved.deviceName || result.deviceName,
-      batteryLevel: result.batteryLevel,
-    });
-    console.log("[App] Auto-reconnected to", saved.deviceId);
+    if (!saved?.bleId) return;
+    const device = await reconnectIfPermitted(saved.bleId);
+    if (device) console.log("[App] Reconnected to", device.name ?? device.deviceId);
   } catch (e) {
-    // Auto-reconnect is best-effort — don't crash the app
-    console.warn("[App] Auto-reconnect failed silently:", e);
+    console.warn("[App] Auto-reconnect failed:", e?.message ?? e);
   }
 }
 

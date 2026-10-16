@@ -15,15 +15,33 @@ import { runDemoSession } from "../services/demoRecordings";
 import { getPipeline } from "../services/inferenceService";
 import ResultBadge from "../components/ResultBadge";
 import StatusTag from "../components/StatusTag";
+import RecordingPanel from "../components/RecordingPanel";
 import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
 import { formatTimestamp } from "../utils/formatters";
 import { describeSession, describeSyncStatus } from "../utils/sessionView";
+import { PERSONAL_BLOCKER_TEXT } from "../utils/researchView";
 
 export default function DashboardScreen({ navigation }) {
-  const { sessions, addNewSession, deviceStatus, syncStatus, syncNow, localStoreError } = useAppContext();
+  const {
+    sessions, addNewSession, deviceStatus, deviceName, syncStatus, syncNow, localStoreError,
+    recordingState, startOnBoardRecording, dismissRecording, settings,
+  } = useAppContext();
   const [isSimulating, setIsSimulating] = useState(false);
   const [isAnalysingDemo, setIsAnalysingDemo] = useState(false);
-  const busy = isSimulating || isAnalysingDemo;
+  const recordingActive = !["IDLE", "COMPLETED", "ERROR"].includes(recordingState.phase);
+  const busy = isSimulating || isAnalysingDemo || recordingActive;
+  const latestDevicePersonal = sessions.find((s) => s.source === "ble" && s.personal)?.personal ?? null;
+
+  function openSession(id, fallback) {
+    const session = sessions.find((s) => s.id === id) ?? fallback;
+    if (!session) return;
+    navigation.navigate("History", { screen: "SessionDetail", params: { session }, initial: false });
+  }
+
+  function handleViewRecordingResult() {
+    const { sessionId, record } = recordingState;
+    openSession(sessionId, record ? { ...record, id: sessionId, timestamp: new Date(), sync: { state: "pending" } } : null);
+  }
 
   const lastSession = sessions[0] || null;
   const pendingCount = sessions.filter((s) => s.sync?.state === "pending").length;
@@ -75,17 +93,36 @@ export default function DashboardScreen({ navigation }) {
         <Text style={styles.subtitle}>Here's your inhaler summary</Text>
       </View>
 
-      {/* Device status banner */}
-      <View style={[styles.deviceBanner, { borderColor: deviceStatus === "Connected" ? COLORS.success : COLORS.border }]}>
+      {/* Device status banner (real BLE state) */}
+      <TouchableOpacity
+        style={[styles.deviceBanner, { borderColor: deviceStatus === "Connected" ? COLORS.success : COLORS.border }]}
+        onPress={() => navigation.navigate("Device")}
+        activeOpacity={0.8}
+      >
         <Ionicons
           name={deviceStatus === "Connected" ? "bluetooth" : "bluetooth-outline"}
           size={16}
           color={deviceStatus === "Connected" ? COLORS.success : COLORS.textMuted}
         />
         <Text style={[styles.deviceBannerText, { color: deviceStatus === "Connected" ? COLORS.success : COLORS.textMuted }]}>
-          {deviceStatus === "Connected" ? "Device Connected" : "No Device Connected"}
+          {deviceStatus === "Connected"
+            ? `Connected to ${deviceName ?? "PRISM device"}`
+            : deviceStatus === "Connecting" ? "Connecting…" : "No device connected"}
         </Text>
-      </View>
+        <Ionicons name="chevron-forward" size={14} color={COLORS.textMuted} style={styles.bannerChevron} />
+      </TouchableOpacity>
+
+      {/* Primary action: record with the PRISM device */}
+      <RecordingPanel
+        state={recordingState}
+        deviceStatus={deviceStatus}
+        deviceName={deviceName}
+        recordingSeconds={settings.recordingSeconds}
+        onStart={() => startOnBoardRecording()}
+        onConnect={() => navigation.navigate("Device")}
+        onViewResult={handleViewRecordingResult}
+        onDismiss={dismissRecording}
+      />
 
       {/* Cloud sync card */}
       <View style={[styles.card, SHADOW.card]}>
@@ -113,15 +150,32 @@ export default function DashboardScreen({ navigation }) {
       <View style={[styles.card, SHADOW.card]}>
         <Text style={styles.cardTitle}>Last Session</Text>
         {lastSession ? (
-          <LastSessionContent session={lastSession} />
+          <LastSessionContent session={lastSession} onOpen={() => openSession(lastSession.id, lastSession)} />
         ) : (
-          <Text style={styles.emptyText}>No sessions yet. Run a simulated session below.</Text>
+          <Text style={styles.emptyText}>No sessions yet. Record with the PRISM device above.</Text>
         )}
       </View>
 
+      {/* Personal baseline status (research V3: not available) */}
+      <View style={[styles.card, SHADOW.card]}>
+        <Text style={styles.cardTitle}>Personal baseline</Text>
+        <Text style={styles.syncText}>Not available</Text>
+        <Text style={styles.description}>
+          {PERSONAL_BLOCKER_TEXT.SITTING_DEFINITION_INCOMPATIBLE} {PERSONAL_BLOCKER_TEXT.NOT_VALIDATED}
+        </Text>
+        {latestDevicePersonal && Number.isInteger(latestDevicePersonal.n_sittings) && (
+          <Text style={styles.timestamp}>
+            This device: {latestDevicePersonal.n_sittings} sitting(s) recorded, {latestDevicePersonal.n_qualifying_sittings} of {latestDevicePersonal.s_min} would qualify.
+          </Text>
+        )}
+      </View>
+
+      {/* Demo and test: separate from the device recording, labelled as such */}
+      <Text style={styles.sectionLabel}>Demo and test (not device recordings)</Text>
+
       {/* Simulated session button */}
       <TouchableOpacity
-        style={[styles.simulateBtn, busy && styles.btnDisabled]}
+        style={[styles.simulateBtn, styles.simulateSecondary, busy && styles.btnDisabled]}
         onPress={handleSimulate}
         disabled={busy}
         activeOpacity={0.8}
@@ -166,11 +220,11 @@ export default function DashboardScreen({ navigation }) {
   );
 }
 
-function LastSessionContent({ session }) {
+function LastSessionContent({ session, onOpen }) {
   const view = describeSession(session);
 
   return (
-    <View style={styles.lastSessionContent}>
+    <TouchableOpacity style={styles.lastSessionContent} onPress={onOpen} activeOpacity={0.8}>
       <View style={styles.badgeRow}>
         <ResultBadge label={view.status.key} />
         <View style={styles.tagsRow}>
@@ -190,7 +244,7 @@ function LastSessionContent({ session }) {
           <MiniStat icon="remove-circle-outline" value={view.counts.notScoreable} label="Not scoreable" />
         </View>
       )}
-    </View>
+    </TouchableOpacity>
   );
 }
 
@@ -229,7 +283,17 @@ const styles = StyleSheet.create({
     padding: SPACING.sm + 2,
     marginBottom: SPACING.md,
   },
-  deviceBannerText: { fontSize: 13, fontWeight: "500" },
+  deviceBannerText: { fontSize: 13, fontWeight: "500", flex: 1 },
+  bannerChevron: { marginLeft: "auto" },
+  sectionLabel: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: COLORS.textMuted,
+    textTransform: "uppercase",
+    letterSpacing: 1,
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.sm,
+  },
 
   card: {
     backgroundColor: COLORS.surface,
@@ -290,6 +354,7 @@ const styles = StyleSheet.create({
     marginBottom: SPACING.sm,
   },
   demoBtn: { backgroundColor: COLORS.tagBle, marginTop: SPACING.md },
+  simulateSecondary: { backgroundColor: COLORS.tagSim },
   btnDisabled: { opacity: 0.6 },
   simulateBtnText: { color: "#fff", fontSize: 16, fontWeight: "700" },
 

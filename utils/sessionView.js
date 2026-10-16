@@ -75,7 +75,7 @@ export const INPUT_ERROR_TEXT = Object.freeze({
 export const SOURCE_TEXT = Object.freeze({
   simulation: "Simulation (synthetic test audio)",
   wav: "WAV file",
-  ble: "Inhaler device",
+  ble: "PRISM device (BLE)",
 });
 
 export const SYNC_TEXT = Object.freeze({

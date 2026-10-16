@@ -1,8 +1,21 @@
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from "react";
-import { AppState } from "react-native";
+import { AppState, Vibration } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getSessions } from "../services/sessionService";
 import { localSessionStore, sessionSync } from "../services/appServices";
 import { mergeSessionLists, withTimeout } from "../services/syncService";
+import { getRecorder } from "../services/bleService";
+import { createRecordingWorkflow, LIFECYCLE } from "../services/recordingWorkflow";
+import { analyseHardwareRecording, deviceHistory } from "../services/hardwareSession";
+import { saveRecordingAudio } from "../services/audioFiles";
+import { getPipeline } from "../services/inferenceService";
+import { saveDevice } from "../services/deviceService";
+import { saveLastDevice } from "../services/storageService";
+
+const SETTINGS_KEY = "@PRISM:settings";
+/** App settings kept on this phone. recordingSeconds: length of an on-board recording. */
+export const DEFAULT_SETTINGS = Object.freeze({ recordingSeconds: 10, vibrateOnResult: true });
+export const RECORDING_SECONDS_CHOICES = Object.freeze([5, 10, 15]);
 
 /** How long a background fetch of the Firestore history may take before it is ignored. */
 const REMOTE_HISTORY_TIMEOUT_MS = 20000;
@@ -25,11 +38,21 @@ export function AppProvider({ children }) {
   const remoteSessionsRef = useRef([]);
   const userIdRef = useRef(null);
 
-  // Device state
+  // Device state: driven by the BLE recorder (services/bleService.js), never simulated.
   const [deviceStatus, setDeviceStatus] = useState("Disconnected");
   const [deviceId, setDeviceId] = useState(null);
   const [deviceName, setDeviceName] = useState(null);
-  const [batteryLevel, setBatteryLevel] = useState(null);
+  const [deviceInfo, setDeviceInfo] = useState(null);
+  // The hardware has no battery measurement, so no level is ever reported.
+  const batteryLevel = null;
+
+  // On-board recording lifecycle (services/recordingWorkflow.js)
+  const [recordingState, setRecordingState] = useState({ phase: LIFECYCLE.IDLE });
+  const sessionsRef = useRef([]);
+  const workflowRef = useRef(null);
+
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const settingsRef = useRef(DEFAULT_SETTINGS);
 
   // ─── Auth ────────────────────────────────────────────────────────────────────
 
@@ -47,7 +70,9 @@ export function AppProvider({ children }) {
       setLocalStoreError(corrupt.length > 0
         ? `${corrupt.length} stored session(s) could not be read and are not shown.`
         : null);
-      setSessions(mergeSessionLists(entries, remoteSessionsRef.current));
+      const merged = mergeSessionLists(entries, remoteSessionsRef.current);
+      sessionsRef.current = merged;
+      setSessions(merged);
     } catch (e) {
       console.error("[AppContext] Local session store unreadable:", e);
       setLocalStoreError(`Sessions on this phone could not be read: ${e?.message ?? e}`);
@@ -94,10 +119,12 @@ export function AppProvider({ children }) {
     await refreshLocalSessions();
     return entry.record.session_id;
   }, [refreshLocalSessions]);
+  const addNewSessionRef = useRef(addNewSession);
+  addNewSessionRef.current = addNewSession;
 
   /**
-   * Prepends a session object that was already saved to Firestore (BLE path).
-   * (No BLE session writer exists yet; kept for a future BLE path.)
+   * Prepends a session object to the list (kept for callers of the previous API; BLE sessions are
+   * stored through addNewSession like every other session).
    * @param {Object} session — must include id
    */
   const prependSession = useCallback((session) => {
@@ -132,19 +159,112 @@ export function AppProvider({ children }) {
 
   // ─── Device ──────────────────────────────────────────────────────────────────
 
-  const setDeviceConnected = useCallback(({ deviceId: id, deviceName: name, batteryLevel: battery }) => {
+  const setDeviceConnected = useCallback((device) => {
     setDeviceStatus("Connected");
-    setDeviceId(id);
-    setDeviceName(name);
-    setBatteryLevel(battery);
+    setDeviceId(device?.deviceId ?? null);
+    setDeviceName(device?.name ?? null);
+    setDeviceInfo(device ?? null);
   }, []);
 
   const setDeviceDisconnected = useCallback(() => {
     setDeviceStatus("Disconnected");
     setDeviceId(null);
     setDeviceName(null);
-    setBatteryLevel(null);
+    setDeviceInfo(null);
   }, []);
+
+  // The recorder reports connects and disconnects (including a device that goes out of range).
+  // Every new connection (Device screen, on-board recording, start-up reconnect) is remembered on
+  // this phone for the next start-up, and registered in Firestore in the background.
+  useEffect(() => {
+    let lastBleId = null;
+    return getRecorder().subscribe(({ connected, device }) => {
+      if (!connected) {
+        lastBleId = null;
+        setDeviceDisconnected();
+        return;
+      }
+      setDeviceConnected(device);
+      if (device.bleId === lastBleId) return;
+      lastBleId = device.bleId;
+      saveLastDevice({ bleId: device.bleId, deviceId: device.deviceId, deviceName: device.name })
+        .catch((err) => console.warn("[AppContext] last device not saved:", err?.message ?? err));
+      const uid = userIdRef.current;
+      if (uid) {
+        saveDevice(uid, { deviceId: device.deviceId, name: device.name ?? device.deviceId })
+          .catch((err) => console.warn("[AppContext] device not registered in Firestore:", err?.message ?? err));
+      }
+    });
+  }, [setDeviceConnected, setDeviceDisconnected]);
+
+  /** Connect to a PRISM device (bleId null: the first one found) and remember it. Throws RecorderError. */
+  const connectDevice = useCallback(async (bleId = null) => {
+    setDeviceStatus("Connecting");
+    try {
+      const device = await getRecorder().connect({ deviceId: bleId });
+      setDeviceConnected(device); // also remembered by the recorder subscription above
+      return device;
+    } catch (e) {
+      setDeviceStatus(getRecorder().isConnected() ? "Connected" : "Disconnected");
+      throw e;
+    }
+  }, [setDeviceConnected]);
+
+  const disconnectDevice = useCallback(async () => {
+    await getRecorder().disconnect();
+    setDeviceDisconnected();
+  }, [setDeviceDisconnected]);
+
+  // ─── Settings ────────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    AsyncStorage.getItem(SETTINGS_KEY).then((raw) => {
+      if (!raw) return;
+      try {
+        const stored = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+        if (!RECORDING_SECONDS_CHOICES.includes(stored.recordingSeconds)) stored.recordingSeconds = DEFAULT_SETTINGS.recordingSeconds;
+        settingsRef.current = stored;
+        setSettings(stored);
+      } catch {
+        console.warn("[AppContext] settings unreadable; defaults used");
+      }
+    }).catch((e) => console.warn("[AppContext] settings not loaded:", e?.message ?? e));
+  }, []);
+
+  const updateSettings = useCallback(async (change) => {
+    const next = { ...settingsRef.current, ...change };
+    settingsRef.current = next;
+    setSettings(next);
+    await AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+  }, []);
+
+  // ─── On-board recording ──────────────────────────────────────────────────────
+
+  if (!workflowRef.current) {
+    workflowRef.current = createRecordingWorkflow({
+      recorder: getRecorder(),
+      keepAudio: saveRecordingAudio,
+      analyse: (recording, { audioFile }) => analyseHardwareRecording(getPipeline, recording, {
+        audioFile,
+        history: deviceHistory(sessionsRef.current, recording.device?.deviceId ?? null),
+      }),
+      save: (record) => addNewSessionRef.current(record),
+      onState: (state) => {
+        setRecordingState(state);
+        if (state.phase === LIFECYCLE.COMPLETED && settingsRef.current.vibrateOnResult) Vibration.vibrate(200);
+      },
+    });
+  }
+
+  /** Record with the connected (or first found) PRISM device, analyse, save. Never throws. */
+  const startOnBoardRecording = useCallback(() => {
+    const workflow = workflowRef.current;
+    if (workflow.isRunning()) return Promise.resolve(null);
+    const seconds = settingsRef.current.recordingSeconds;
+    return workflow.run({ nSamples: Math.round(seconds * 8000) });
+  }, []);
+
+  const dismissRecording = useCallback(() => workflowRef.current.reset(), []);
 
   // ─── Value ───────────────────────────────────────────────────────────────────
 
@@ -165,9 +285,17 @@ export function AppProvider({ children }) {
         deviceStatus,
         deviceId,
         deviceName,
+        deviceInfo,
         batteryLevel,
         setDeviceConnected,
         setDeviceDisconnected,
+        connectDevice,
+        disconnectDevice,
+        recordingState,
+        startOnBoardRecording,
+        dismissRecording,
+        settings,
+        updateSettings,
       }}
     >
       {children}

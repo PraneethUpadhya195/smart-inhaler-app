@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useMemo } from "react";
 import {
   View,
   Text,
@@ -8,10 +8,13 @@ import {
 } from "react-native";
 import { useAppContext } from "../context/AppContext";
 import SessionCard from "../components/SessionCard";
+import TrendsCard from "../components/TrendsCard";
 import { COLORS, SPACING } from "../utils/theme";
+import { describeTrends } from "../utils/trendsView";
 
 export default function HistoryScreen({ navigation }) {
   const { sessions, isLoadingSessions } = useAppContext();
+  const trends = useMemo(() => describeTrends(sessions), [sessions]);
 
   if (isLoadingSessions) {
     return (
@@ -27,7 +30,7 @@ export default function HistoryScreen({ navigation }) {
       <View style={styles.centered}>
         <Text style={styles.emptyIcon}>💨</Text>
         <Text style={styles.emptyTitle}>No sessions yet</Text>
-        <Text style={styles.emptySubtitle}>Go to Dashboard and tap "Run Simulated Session"</Text>
+        <Text style={styles.emptySubtitle}>Record with the PRISM device from the Dashboard ("Test On-Board Recording").</Text>
       </View>
     );
   }
@@ -46,7 +49,10 @@ export default function HistoryScreen({ navigation }) {
       contentContainerStyle={styles.listContent}
       showsVerticalScrollIndicator={false}
       ListHeaderComponent={
-        <Text style={styles.count}>{sessions.length} sessions total</Text>
+        <>
+          <TrendsCard trends={trends} />
+          <Text style={styles.count}>{sessions.length} sessions total</Text>
+        </>
       }
     />
   );

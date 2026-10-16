@@ -2,13 +2,17 @@ import React, { useEffect, useState } from "react";
 import { View, Text, StyleSheet, ScrollView } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useAppContext } from "../context/AppContext";
-import { loadDemoWaveform } from "../services/demoRecordings";
+import { loadSessionWaveform } from "../services/sessionWaveform";
 import ResultBadge from "../components/ResultBadge";
 import StatusTag from "../components/StatusTag";
 import Waveform from "../components/Waveform";
+import CaptureCard from "../components/CaptureCard";
+import ResearchMeasurements from "../components/ResearchMeasurements";
 import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
 import { formatTimestamp, formatTime } from "../utils/formatters";
 import { describeSession } from "../utils/sessionView";
+import { describeCapture } from "../utils/captureView";
+import { describeResearch } from "../utils/researchView";
 
 export default function SessionDetailScreen({ route }) {
   const { sessions } = useAppContext();
@@ -16,15 +20,21 @@ export default function SessionDetailScreen({ route }) {
   const passed = route.params.session;
   const session = sessions.find((s) => s.id === passed.id) ?? passed;
   const view = describeSession(session);
+  const capture = describeCapture(session);
+  const research = !view.legacy && !view.simulated ? describeResearch(session) : null;
 
-  // Sessions analysed from a bundled demo recording: draw that recording (null for any other session).
+  // The recording behind the session: a bundled demo recording, or a PRISM device recording kept
+  // on this phone (null for simulated and legacy sessions).
   const [waveform, setWaveform] = useState(null);
   useEffect(() => {
     let active = true;
     setWaveform(null);
-    loadDemoWaveform(session)
+    loadSessionWaveform(session)
       .then((w) => { if (active) setWaveform(w); })
-      .catch((e) => console.warn("[SessionDetail] demo waveform not loaded:", e?.message ?? e));
+      .catch((e) => {
+        console.warn("[SessionDetail] waveform not loaded:", e?.message ?? e);
+        if (active) setWaveform({ missing: "The recording could not be read on this phone." });
+      });
     return () => { active = false; };
   }, [session.id]); // eslint-disable-line react-hooks/exhaustive-deps -- the recording is fixed per session
 
@@ -77,18 +87,27 @@ export default function SessionDetailScreen({ route }) {
         {view.sync.detail && <Text style={styles.small}>Last attempt: {view.sync.detail}</Text>}
       </View>
 
-      {/* Bundled demo recording: waveform with the detected events */}
+      {/* The recording: waveform with the detected events */}
       {waveform && (
         <View style={[styles.card, SHADOW.card]}>
           <Text style={styles.sectionTitle}>Recording</Text>
-          <Text style={styles.small}>{waveform.recordingId}</Text>
-          <Waveform
-            peaks={waveform.peaks}
-            durationS={waveform.durationS}
-            events={view.events.filter((ev) => ev.recordingNumber === null)}
-          />
+          {waveform.missing ? (
+            <Text style={styles.small}>{waveform.missing}</Text>
+          ) : (
+            <>
+              <Text style={styles.small}>{waveform.label}</Text>
+              <Waveform
+                peaks={waveform.peaks}
+                durationS={waveform.durationS}
+                events={view.events.filter((ev) => ev.recordingNumber === null)}
+              />
+            </>
+          )}
         </View>
       )}
+
+      {/* PRISM device recordings: how the audio was captured and received */}
+      {capture && <CaptureCard capture={capture} />}
 
       {/* Counts */}
       {view.counts && (
@@ -129,6 +148,9 @@ export default function SessionDetailScreen({ route }) {
           ))}
         </View>
       )}
+
+      {/* Research measurements: separate and collapsed (utils/researchView.js) */}
+      {research && (research.available || research.personal) && <ResearchMeasurements research={research} />}
 
       {/* Device info */}
       {view.deviceId && (

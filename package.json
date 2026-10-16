@@ -7,7 +7,7 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "test": "node pipeline/test_harness.js && node pipeline/test_contract.js && node services/test_sessions.js && node utils/test_session_view.js",
+    "test": "node pipeline/test_harness.js && node pipeline/test_contract.js && node pipeline/test_assessment.js && node services/test_sessions.js && node services/test_ble.js && node utils/test_session_view.js && node utils/test_recording_view.js",
     "postinstall": "patch-package"
   },
   "dependencies": {
@@ -19,6 +19,8 @@
     "@react-navigation/native": "^7.2.2",
     "@react-navigation/stack": "^7.8.11",
     "expo": "~57.0.27",
+    "expo-asset": "~57.0.19",
+    "expo-file-system": "~57.0.7",
     "expo-font": "~57.0.4",
     "expo-status-bar": "~57.0.1",
     "fft.js": "^4.0.4",
@@ -28,6 +30,7 @@
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.3",
+    "react-native-ble-plx": "3.5.1",
     "react-native-gesture-handler": "~2.32.0",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0",

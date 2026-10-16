@@ -4,7 +4,7 @@ const LAST_DEVICE_KEY = "@SmartInhaler:lastDevice";
 
 /**
  * Persists the last connected device info to AsyncStorage.
- * @param {{ deviceId: string, deviceName: string }} deviceInfo
+ * @param {{ bleId: string, deviceId: string, deviceName: string|null }} deviceInfo - BLE id (to reconnect), PRISM device id, name
  */
 export async function saveLastDevice(deviceInfo) {
   await AsyncStorage.setItem(LAST_DEVICE_KEY, JSON.stringify(deviceInfo));
@@ -12,7 +12,7 @@ export async function saveLastDevice(deviceInfo) {
 
 /**
  * Retrieves the last connected device info from AsyncStorage.
- * @returns {Promise<{ deviceId: string, deviceName: string } | null>}
+ * @returns {Promise<{ bleId?: string, deviceId: string, deviceName: string|null } | null>} (entries of earlier versions have no bleId)
  */
 export async function getLastDevice() {
   const raw = await AsyncStorage.getItem(LAST_DEVICE_KEY);
