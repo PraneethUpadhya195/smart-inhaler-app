@@ -2133,3 +2133,418 @@ This log only (Entry 26).
 ## Open issues / next step
 - The 20-recording pool expansion is a separate task (not started).
 - The backup folder above contains the Firebase sign-in record; delete it when no longer needed.
+
+# Entry 27 — 2026-10-21: Dashboard: remove the two demo/test buttons
+
+## Objective
+Remove only the "Run Simulated Session" and "Analyse Demo Recording" buttons from the bottom of the Dashboard, with their explanatory texts. Everything else stays as it is: the Personal baseline card, the recording panel, the Last Session and Cloud Sync cards, and the underlying demo and simulation services, screens and session data.
+
+## What was inspected / changed
+**`screens/DashboardScreen.js` only** (edited with a scratchpad script that asserts each removed block occurs exactly once):
+- **Removed from the screen:**
+  - the section heading "Demo and test (not device recordings)";
+  - both buttons;
+  - both hint texts under them.
+- **Removed because only these buttons used them:**
+  - the handlers `handleSimulate` and `handleDemo`;
+  - the states `isSimulating` and `isAnalysingDemo`, and `recordingActive` / `busy`;
+  - `addNewSession` from the context destructuring;
+  - the imports `useState`, `Alert`, `runSimulatedSession`, `runDemoSession` and `getPipeline`;
+  - the styles `sectionLabel`, `simulateBtn`, `demoBtn`, `simulateSecondary`, `simulateBtnText` and `hint`.
+- **Kept:**
+  - the Personal baseline card;
+  - all other cards and the layout;
+  - `services/simulationService.js`, `services/demoRecordings.js`, `services/demoSession.js` (still present, unchanged);
+  - stored sessions.
+
+## Results (V = run; O = read in code; N = not verified)
+- **V:** `PRISM_REQUIRE_DATASET=1 npm test` → exit 0, before and after.
+  - harness all passed;
+  - contract 446, assessment 503, sessions 150, ble 102, split source 195, demo baseline 71, session view 266, recording view 71;
+  - 0 failed.
+- **O:** no other file referenced the removed handlers or styles.
+- **N:** the Dashboard on a phone (not built or installed in this entry; see Entry 28 for the build).
+
+## Files changed
+`screens/DashboardScreen.js`; this log.
+
+## Tests (command and outcome)
+`PRISM_REQUIRE_DATASET=1 npm test` → exit 0 (counts above).
+
+## Open issues / next step
+- Not committed (no commit requested).
+- Entry 28 changes the same file's Personal baseline card.
+
+# Entry 28 — 2026-10-21: "Personal Baseline" naming, Dashboard summary, human-readable reference labels
+
+## Objective
+Three presentational changes to the Entry 25 baseline (commit `fc08770`), with no change to the baseline itself:
+1. Show it to users as **"Personal Baseline"** instead of "Demo Baseline".
+2. Add a **Personal Baseline summary to the Dashboard**.
+3. Show **human-readable reference recording labels** instead of internal ids such as `ref-inhalation-06`.
+
+**Unchanged:**
+- the algorithm, normalisation, storage key, format, update and reset rules;
+- the eight-recording pool;
+- Entry 19 selection, BLE, firmware, capture, playback and the analysis pipeline;
+- Stage 9, session records and Firebase.
+
+## What was inspected / changed
+**Inspection (O = read in code, V = run):**
+- **"Demo Baseline" user-facing text** was in two files:
+  - `components/DemoBaselineCard.js`: title, reset button, confirmation and its failure alert;
+  - `utils/researchView.js`: the explanation and the three "this session …" texts.
+
+  Two user-visible error strings were in `services/demoBaseline.js` (the load and save errors shown in the card).
+
+  Internal names were left as they are: module, component, functions, storage key `@PRISM:demoBaseline`, schema and code comments in `context/AppContext.js` / `screens/SessionDetailScreen.js`.
+- **Persisted state and access:**
+  - one AsyncStorage key `@PRISM:demoBaseline`;
+  - AppContext loads it at start-up into `demoBaseline` (React state);
+  - after each stored session, the workflow `save` step replaces that state with what `observe()` returns;
+  - `resetDemoBaseline` replaces it with the reset state.
+
+  No screen has a focus listener (`useFocusEffect` / `addListener` are not used anywhere). Screens re-render when the context value changes. That is the existing refresh pattern (the Last Session card uses it).
+- **Where internal reference ids were shown:** only the "Most recent reference" row of the session screen's baseline section (`state.last_reference_id`).
+  - Not shown by: the History list, the other session-screen sections, or the waveform caption (null for Start Event sessions).
+  - Checked by grep for `reference_id`, `ref-inhalation` and `analysis_source` in `screens/`, `components/`, `utils/`.
+- **Timestamps, traced to their origin:**
+  - **Reference recording time (source).** The dataset recording id (`analysisRecordings.js` `recordingId`, e.g. `rec2018-05-03_11h43m36.628s.wav`) is the dataset's file name.
+    - Research `PRISM_RESEARCH_LOG.md` (dataset audit): every file follows the template `recYYYY-MM-DD_HHhMMmSS.sss.wav`.
+    - The metadata audit (also ARCHITECTURE.md): "the WAVs carry no metadata chunks; filenames are timestamps only".
+    - **No time zone is documented.** This is the only source-recording time.
+  - **Session times** (`recorded_at`, `saved_at`, list `timestamp`): when this phone's session was recorded and stored. They are not the reference's time and are not used for the labels.
+  - **Baseline `updated_at` (= the last contribution's `at`):** `createDemoBaselineStore` writes it with `now().toISOString()` (phone clock, UTC) when a stored session updates the baseline. It is shown as "Last updated".
+- **Wording constraints:** the UI scan (`utils/test_session_view.js`) forbids "deviation" outside `utils/researchView.js` / `components/ResearchMeasurements.js`, and forbids "quality", "technique", "confidence" and others in every UI file. So the Dashboard says "distance", as the session screen already does.
+- **Dashboard placement:** the owner chose one card. The existing "Personal baseline" card now shows the summary.
+  - Removed from that card: its V3 text ("Not available", two blocker sentences) and the line "This device: N sitting(s) recorded…".
+  - The V3 status itself is unchanged: in session records and in the session screen's research section.
+
+**Changes:**
+- **`utils/researchView.js` (additions, plus the wording lines):**
+  - **`DEMO_BASELINE_EXPLANATION`** (the text the owner proposed): "Preliminary baseline derived from reference inhalation recordings. It demonstrates baseline initialization and adaptation and is not yet personalized to an individual's inhalation patterns."
+  - **"This session …" texts:** now say "personal baseline".
+  - **`referenceRecordedAt(recordingId)`:** parses the dataset time and rejects ids that are not in the pattern or are impossible times (e.g. Feb 31; hour 25). It is read as a local wall-clock time, so `formatTimestamp` shows it as written, without time-zone conversion.
+  - **`referenceRecordingLabel(referenceId)`:**
+    - normally "Inhalation reference — Jan 23, 2018, 11:00 AM" or "No-inhalation reference — …", formatted with the project's `formatTimestamp`;
+    - fallbacks: "Inhalation reference recording" / "No-inhalation reference recording" (no usable time), "Reference recording" (unknown id), "—" (none);
+    - it never uses a session time.
+  - **`describeBaselineSummary(demo)`** (Dashboard view, read-only):
+    - fields: status, explanation, error;
+    - only when initialized: sessions processed, unique references, latest distance ("—" after the first session, which has none), and last updated (`formatTimestamp(updated_at)`);
+    - null until the baseline is loaded.
+  - **`describeDemoBaseline`:** "Most recent reference" now shows `referenceRecordingLabel(last_reference_id)`.
+- **`components/DemoBaselineCard.js` (strings and doc comment):**
+  - title "Personal Baseline";
+  - button "Reset personal baseline";
+  - confirmation "Reset the personal baseline?" / "This clears only the personal baseline and its processing record. Sessions, recordings and other settings are kept.";
+  - failure alert "Personal baseline not reset".
+
+  The reset behaviour is unchanged (same `resetDemoBaseline`, one key).
+- **`services/demoBaseline.js`: two string literals only** (`git diff -U0`: lines 165 and 196): "The personal baseline could not be read. Reset it to start again." / "The personal baseline could not be saved."
+- **`screens/DashboardScreen.js` (the existing card):**
+  - title "Personal Baseline";
+  - status ("—" before loading, "Not initialized" / "Initialized");
+  - the explanation, and a storage error if any;
+  - when initialized, four rows: Eligible sessions processed, Unique reference recordings, Most recent distance (before update), Last updated.
+  - **Read-only:** it reads `demoBaseline` from `useAppContext()`. No observe, reset or storage call. No second reset control (the reset stays on the session screen).
+  - **Code:** a small `SummaryRow` component; styles copied from the session-screen card's rows.
+  - **Unused after this change, and removed:** the `PERSONAL_BLOCKER_TEXT` import and `latestDevicePersonal`.
+- **`services/test_demo_baseline.js`:**
+  - two wording regexes updated ("demo baseline" → "personal baseline");
+  - new sections 16–20 (below).
+
+  No existing check was removed or weakened.
+
+## Results (V = run; O = read in code; N = not verified)
+**Tests (V):** `PRISM_REQUIRE_DATASET=1 npm test` → exit 0.
+- harness all passed;
+- contract 446, assessment 503, sessions 150, ble 102, split source 195;
+- **demo baseline 115 (71 + 44 new)**;
+- session view 266 (the UI scan covers the changed Dashboard and card);
+- recording view 71;
+- 0 failed.
+
+One intermediate failure was in a new check: `/demo/i` matched "demonstrates" in the required explanation. The check was narrowed to the whole word "demo" and "demo baseline" / "demonstration".
+
+**New checks (the request's items 1–14):**
+
+| Section | What it verifies (request items) |
+|---|---|
+| 16 | Card, confirmation, alert and Dashboard say "Personal Baseline"; no "demo baseline" wording left in the feature's screens; the two storage messages; no view text says "demo"; the explanation is exactly the text above and claims no learning from the user's inhalations and no validated or quality score (1, 2) |
+| 17 | Dashboard summary: nothing before loading. Not initialized: no counts, distance or time. Initialized: the stored counts, latest distance and `formatTimestamp(updated_at)`, where `updated_at` = the last contribution's time. Building it changes nothing; the Dashboard source has no observe, reset or storage call (3, 4, 5, 7) |
+| 18 | Dashboard refresh through the app's own steps: Dashboard reads `AppContext.demoBaseline`; AppContext replaces it with the `observe()` result. Start-up load → first session (Not initialized → Initialized, 1, 1) → second session (2, 2, its distance and time) = what a restart loads; long press leaves it unchanged; after reset: Not initialized (6) |
+| 19–20 | Labels for `ref-inhalation-01` / `-06` / `ref-no-inhalation-01` = "Inhalation reference — Jan 23, 2018, 11:00 AM" / "… — May 3, 2018, 11:43 AM" / "No-inhalation reference — Jan 23, 2018, 11:00 AM", with all 9 parsed times equal to their dataset ids (8). Labels of the 2026 test sessions show 2018, and the same reference at different session times gives the same label (9). Fallbacks for a non-pattern id, a missing id, an impossible date, an unknown reference and none (10). Reference ids and WAV assets unchanged; the stored state holds ids (never labels) and is keyed by session id; the session screen shows the label, not the id (11) |
+| 1–15 (existing, unchanged) | Baseline update, idempotency, persistence and reset scope (12); Stage 9 = direct assessment (13); Entry 19 selection, long press and wiring (14) |
+
+**Unchanged against `fc08770` (V, `git diff --stat` empty):** `pipeline/`, `services/ble/`, `services/{recordingWorkflow,hardwareSession,analysisRecordings,analysisAudio,sessionRecord,sessionWaveform}.js`, `components/{RecordingPanel,ResearchMeasurements}.js`, `context/`, `screens/{SessionDetailScreen,HistoryScreen}.js`, `firmware/`, `assets/`, `app.json`, `package.json`, `package-lock.json`, `android/`, `firebase/`.
+
+**Android build (V):**
+- `gradlew :app:assembleDebug` (JDK 17) → BUILD SUCCESSFUL.
+- APK SHA-256 `e2dd1e50b19b9386…`; JS bundle `c395a520059f1ed…`.
+- **The bundle contains:** "Personal Baseline", "Reset personal baseline", "Preliminary baseline derived from reference inhalation recordings", "Inhalation reference", "No-inhalation reference", "Eligible sessions processed", "Last updated".
+- **The bundle does not contain:** "Demo Baseline", "Reset demo baseline", "Demonstration baseline", "The demo baseline could not", "Run Simulated Session", "Analyse Demo Recording".
+- **Not installed** (not requested). The phone still runs the Entry 26 build.
+
+**N:** the Dashboard and the session screen on a phone; the Dashboard updating after a real Start Event (tested only through the same steps in Node).
+
+## Files changed
+- `utils/researchView.js`;
+- `components/DemoBaselineCard.js`;
+- `services/demoBaseline.js` (two strings);
+- `screens/DashboardScreen.js` (also Entry 27);
+- `services/test_demo_baseline.js`;
+- this log (Entries 27 and 28).
+
+Not committed.
+
+## Tests (command and outcome)
+- Before (Entry 27 state): `PRISM_REQUIRE_DATASET=1 npm test` → exit 0.
+- After: exit 0 (counts above).
+- `gradlew :app:assembleDebug` → BUILD SUCCESSFUL.
+
+## Open issues / next step
+- **Name overlap on the session screen:** the collapsed "Research measurements" section still shows the V3 research status "Personal baseline: Not available" (`components/ResearchMeasurements.js`, from the session record's `personal` field) next to the "Personal Baseline" card. That section belongs to the future per-user baseline and was left unchanged.
+- **Reference time:**
+  - the dataset documents no time zone, so the time is shown as written in the file name;
+  - `formatTimestamp` shows minutes, not seconds (the request's example had seconds; the project convention was kept).
+- **Old demo-button sessions:** sessions made earlier with the removed "Analyse Demo Recording" button (`source "wav"`) still show the dataset file name above their waveform and in their stored note. The note is stored record content and was not changed. At Entry 26 the phone had no such session.
+- **Internal names still say "demo":** module, component and storage key (`services/demoBaseline.js`, `DemoBaselineCard`, `@PRISM:demoBaseline`), by design: the feature stays separate from the future per-user baseline.
+- **Next:** install in place (`adb install -r`, same signature as Entry 26) and check the Dashboard and session screen on the phone, if the owner asks.
+
+# Entry 29 — 2026-10-21: Session screen: remove the V3 "Personal baseline: Not available" status; in-place install and device check
+
+## Objective
+Remove the redundant "Personal baseline: Not available" status from the collapsed "Research measurements" section of the session screen. The dedicated Personal Baseline card (Entry 28) is the only baseline status there.
+
+Then test, build, install in place on the phone without data loss, and check on the device. Nothing else changes.
+
+## What was inspected / changed
+**Inspection (O):**
+- **Where the status came from:** `components/ResearchMeasurements.js` (lines 58–66 at Entry 28), the `research.personal` block. It is one `<View>` with:
+  - the title "Personal baseline: {status}";
+  - a detail line (qualifying sittings);
+  - bullet reasons (`PERSONAL_BLOCKER_TEXT`).
+- **Source data:** the session record's V3 `personal` field, via `utils/researchView.describeResearch`.
+- **Not part of the Personal Baseline card:** `components/DemoBaselineCard.js` is a separate component.
+- **Which sessions showed it:** only sessions whose record has `personal`, i.e. device sessions analysed from their own audio. Start Event sessions store `personal: null`. On the phone, one session: `ble_sess_1792570518113` (Entry 22).
+
+**Change:**
+- **`components/ResearchMeasurements.js`:** the whole `research.personal` block removed (9 lines, nothing added). The detail and reason lines went with the title, because they only explain that status.
+- **Unchanged:**
+  - the V3 data in session records;
+  - `describeResearch()` (still returns `personal`);
+  - `PERSONAL_BLOCKER_TEXT`;
+  - `screens/SessionDetailScreen.js`.
+
+  The screen's condition `research.available || research.personal` still applies. A session with V3 data but no Stage 9 output would show the section with "No research measurements exist for this session." No such session exists on the phone.
+- **`utils/test_recording_view.js` (+5 checks, section 3):** no React renderer is installed for tests (no `react-test-renderer`, `jest` or `react-dom`). So the rendering source is checked with comments removed, as in `utils/test_session_view.js`:
+  - the research section no longer renders `research.personal` / "Personal baseline";
+  - caveat, interpretation, both empty-state texts and every per-event measurement are still rendered;
+  - the session screen still renders both the research section and the Personal Baseline card;
+  - the card still has its title, explanation, error, State, counts, reference, distance, this-session text, and reset with confirmation;
+  - the V3 status stays in the session data.
+
+## Results (V = run; O = read in code; N = not verified)
+**Tests (V):** `PRISM_REQUIRE_DATASET=1 npm test` → exit 0.
+- harness all passed;
+- contract 446, assessment 503, sessions 150, ble 102;
+- split source 195 (Entry 19 selection, long press, analysis on the selected reference WAV, Stage 9);
+- demo baseline 115 (initialization without a distance, distance against the pre-update baseline, exact update, idempotency, reset scope, Dashboard read-only);
+- session view 266;
+- recording view 76 (71 + 5 new);
+- 0 failed.
+
+**Build (V):**
+- `gradlew :app:assembleDebug` (JDK 17) → BUILD SUCCESSFUL.
+- APK SHA-256 `a9a405d62b655602…`; JS bundle `9c51aca68494bfcf…`.
+- The bundle has no "Personal baseline: " string. It still contains "Personal Baseline", "Reset personal baseline", "Research measurements", "Acoustic deviation: " and "Largest contribution: ".
+
+**Phone (V):**
+- **Connection:** at first `adb devices` listed nothing. The phone's ADB interface was present in Windows (WinUSB driver), and the libusb backend did not help either. The owner then revoked and re-allowed USB debugging and replugged. After that, `BQBERCSW9TG6HQ8D` (IV2201) was authorized. The adb server was put back on its default backend.
+- **Before install:**
+  - installed `com.anonymous.smart_inhaler_app`: versionCode 1, `base.apk` `356f3744…` (Entry 26 build), lastUpdateTime 15:25:01;
+  - same application id, versionCode and certificate as the new APK (`apksigner`: CN=Android Debug, SHA-256 `fac61745…3b9c`).
+- **Backup:** `run-as` (app force-stopped) to `C:\CAPSTONE\backups\phone_app_data_before_entry29_install_2026-10-21\`.
+  - 23 files; `sha256sum -c` OK.
+  - **Sensitive:** it includes the Firebase sign-in record.
+- **State before install:**
+  - 14 keys, 8 sessions, 8 recordings, the Firebase sign-in record;
+  - Personal Baseline initialized: 2 sessions, `ref-inhalation-05` / `-06`, D = 0.9193721253434108, updated 2026-10-21T10:16:37.463Z. These are two Start Event sessions the owner made after Entry 26.
+- **Install:** `adb install -r` → Success.
+  - firstInstallTime unchanged (2026-10-09 13:33:11), so the app was not uninstalled;
+  - lastUpdateTime 16:36:34;
+  - installed `base.apk` = `a9a405d6…`;
+  - all 23 app-data files byte-identical to the backup.
+
+**Device checks** (uiautomator text dumps and screenshots, in the session scratchpad):
+
+| Check | Result |
+|---|---|
+| Launch | The app starts. The Dashboard shows the device banner, recording panel, Cloud Sync and Last Session |
+| Dashboard Personal Baseline card | "Initialized", the explanation, 2 / 2 / 0.919 / "Oct 21, 2026, 3:46 PM" (= `updated_at` in local time) |
+| History | 8 sessions listed; Trends card shown |
+| Entry 22 session, research section expanded | Caveat, interpretation, "No inhalation was detected, so nothing was measured."; **no "Personal baseline: Not available" block** |
+| Entry 22 session, Personal Baseline card | Explanation, State, 2, 2, "Inhalation reference — May 3, 2018, 11:43 AM", 0.919, "This session was skipped: not a Start Event analysis …", "Reset personal baseline" |
+| Reset control | Tapping it opens "Reset the personal baseline?" with its scope text; **CANCEL** tapped; the card still shows Initialized / 2 / 2 / 0.919 |
+| Start Event session 3:46 PM (`ref-inhalation-06`), research section | Event 1: "Acoustic deviation: 0.41 (reference upper limit 1.83)" (stored 0.41455…), within range / stable, "305 of 318 … (empirical tail probability 0.959)", largest contribution. Card: "This session updated the personal baseline … 0.919" |
+| Logcat (cleared before launch, 8232 lines) | 0 FATAL, 0 ReactNativeJS errors; the app process (pid 26012) ran through all checks |
+| App data after the checks | All 14 AsyncStorage keys and values identical to the backup (baseline, sessions, settings, selection state, Firebase sign-in record); no key added or removed. The `RKStorage` file bytes differ: SQLite wrote at app start (16:37) without a content change. The other 22 files are byte-identical |
+
+**Cleanup:** the pulled database copy (scratchpad) and the UI dump file on the phone (`/data/local/tmp/prism_ui.xml`) were deleted.
+
+**Layout defect found on the device (from Entry 28, not changed here):** in the session-screen card, the long "Most recent reference" value takes the row's width. The label "Most recent reference" wraps into a narrow column ("Mo / st / rec / ent …"). Cause: `components/DemoBaselineCard.js`, `rowValue` has no `flexShrink`. A likely fix is `flexShrink: 1` and `textAlign: "right"` on `rowValue` (not tried). Not fixed: outside this task's scope.
+
+**Diff review (V):**
+- **This task's diff:** `components/ResearchMeasurements.js` (−9 lines), `utils/test_recording_view.js` (+20 lines), this log entry.
+- **Other uncommitted changes, from Entries 27–28 and untouched here:** `DemoBaselineCard.js`, `DashboardScreen.js`, `demoBaseline.js` (two strings), `test_demo_baseline.js`, `researchView.js`.
+- **Unchanged against `fc08770`:** `pipeline/`, `services/ble/`, the recording, analysis and session-record services, `context/`, `screens/SessionDetailScreen.js`, `screens/HistoryScreen.js`, `firmware/`, `assets/`, `app.json`, `package.json`, `package-lock.json`, `android/`, `firebase/`.
+- The reference pool is still 8 inhalation references plus the no-inhalation reference.
+
+**N:**
+- the reset itself (deliberately not performed);
+- a new Start Event session on the device (not needed for this change);
+- Firestore content (the app showed "All sessions on this phone are synced"; Firebase was not queried).
+
+## Files changed
+- `components/ResearchMeasurements.js`;
+- `utils/test_recording_view.js`;
+- this log.
+
+Not committed; not pushed. Branch `ml-integration`.
+
+## Tests (command and outcome)
+- `node utils/test_recording_view.js` → 76 passed.
+- `node services/test_demo_baseline.js` → 115 passed.
+- `node services/test_split_source.js` → 195 passed.
+- `PRISM_REQUIRE_DATASET=1 npm test` → exit 0 (counts above).
+- `gradlew :app:assembleDebug` → BUILD SUCCESSFUL.
+
+## Open issues / next step
+- Fix the "Most recent reference" row layout in `DemoBaselineCard.js` if the owner approves (see above).
+- Two backup folders under `C:\CAPSTONE\backups\` contain the Firebase sign-in record. Delete them when no longer needed.
+- Entries 27–29 are not committed.
+
+# Entry 30 — 2026-10-21: Personal Baseline card: "Most recent reference" row layout
+
+## Objective
+Fix the layout defect found on the phone in Entry 29. In the session screen's Personal Baseline card, the long "Most recent reference" value ("Inhalation reference — May 3, 2018, 11:43 AM") squeezed its label into a narrow column ("Mo / st / rec / ent …").
+
+Only this layout changes.
+
+## What was inspected / changed
+**Cause (O):** in `components/DemoBaselineCard.js`, each `Row` lays out the label and value side by side (`flexDirection: "row"`, `justifyContent: "space-between"`).
+- `rowLabel` has `flexShrink: 1`; `rowValue` has none.
+- A value wider than the row keeps its full width, so the label shrinks to the space left over.
+
+**Change (`components/DemoBaselineCard.js` only):**
+- `Row` takes an optional `stacked` prop. A stacked row adds the style `rowStacked: { flexDirection: "column", alignItems: "flex-start", gap: 2 }`. The label goes above the value, and the value wraps at the full card width.
+- Only the reference row uses it: `<Row label="Most recent reference" value={view.lastReference} stacked />`.
+- **Unchanged:**
+  - the other rows (State, the two counts, the distance), still side by side;
+  - the label, value and row styles, including the row's bottom border;
+  - the label text, the reference description and its timestamp;
+  - the explanation, this-session text, error text, and the reset button and confirmation;
+  - the Dashboard and the Research measurements section.
+
+**Test (`services/test_demo_baseline.js`, new section 21, +4 checks).** No React renderer is installed for tests, so the component source is checked:
+- the reference row is the only stacked row; the other four are side by side;
+- `Row` applies `rowStacked` and it stacks vertically;
+- the row, label and value styles are otherwise unchanged;
+- the reference value is long enough to need its own line.
+
+## Results (V = run; O = read in code; N = not verified)
+**Tests (V):** `PRISM_REQUIRE_DATASET=1 npm test` → exit 0.
+- harness all passed;
+- contract 446, assessment 503, sessions 150, ble 102, split source 195;
+- **demo baseline 119 (115 + 4 new)**;
+- session view 266, recording view 76;
+- 0 failed.
+
+**Build (V):**
+- `gradlew :app:assembleDebug` (JDK 17) → BUILD SUCCESSFUL.
+- APK `579dd7f25b159c20…`; JS bundle `889dd39994400732…`.
+- Same package, versionCode 1 and debug certificate (`fac61745…3b9c`) as the installed app.
+
+**Before install (V):**
+- The phone (`BQBERCSW9TG6HQ8D`) ran the Entry 29 build (`a9a405d6…`).
+- Its AsyncStorage had the same 14 keys and values as the Entry 29 backup (`C:\CAPSTONE\backups\phone_app_data_before_entry29_install_2026-10-21\`). That backup is still a valid restore point, so no new backup was made.
+
+**Install (V):** `adb install -r` → Success.
+- firstInstallTime unchanged (2026-10-09 13:33:11);
+- lastUpdateTime 17:05:08;
+- installed `base.apk` = `579dd7f2…`;
+- all 23 app-data files byte-identical to before the install.
+
+**Device checks** (uiautomator text dumps with bounds, and a screenshot):
+
+| Check | Result |
+|---|---|
+| Session 3:46 PM (`ref-inhalation-06`), card | "Most recent reference" on one line (bounds x 99–471, one line; Entry 29: x 99–171, 352 px tall). The value on the line below, in full (x 99–885, inside the card's 99–981 content area). No clipping or horizontal overflow |
+| Same card, other parts | State Initialized, 2, 2 and 0.919 still side by side; this-session text; "Reset personal baseline" button laid out as before (not pressed) |
+| Entry 22 session (1:45 PM), card | Same correct layout; "This session was skipped …" and the reset button present |
+| Dashboard | Opens; device banner, recording panel, Cloud Sync, Last Session; Personal Baseline card Initialized / 2 / 2 / 0.919 (unchanged) |
+| History | Opens; 8 sessions; both sessions above open |
+| Logcat (cleared before launch) | 0 FATAL. The app process (pid 22458) ran through all checks. ReactNativeJS: start-up info, "[bleService] last device not reconnected: BLUETOOTH_UNAVAILABLE" (the phone's Bluetooth was off), and two library deprecation warnings (navigation `navigate` object argument, `InteractionManager`); no errors. The `AndroidRuntime` lines come from the uiautomator tool, not the app |
+| App data after the checks | All 14 AsyncStorage keys and values identical (baseline initialized, 2 sessions, `ref-inhalation-05` / `-06`, 0.919; 8 sessions; Firebase sign-in record). The `RKStorage` file bytes differ: SQLite wrote at app start without a content change. The other 22 files are byte-identical |
+
+**Cleanup:** the pulled database copies (scratchpad) and the UI dump file on the phone were deleted.
+
+**Diff review (V):**
+- **This task changed only:**
+  - `components/DemoBaselineCard.js`: the `stacked` prop and its use, the `rowStacked` style, and a one-line comment;
+  - `services/test_demo_baseline.js`: section 21;
+  - this log entry.
+- **Other uncommitted changes (Entries 27–29) are untouched:** against `fc08770`, `DashboardScreen.js`, `ResearchMeasurements.js` and `researchView.js` show the same line counts as after Entry 29.
+- Baseline logic, storage, session records, reference ids, timestamps and the 8-reference pool are unchanged.
+
+**N:** a Personal Baseline with no reference yet (the stacked row would show "—" under its label; not shown on the phone because the baseline is initialized).
+
+## Files changed
+- `components/DemoBaselineCard.js`;
+- `services/test_demo_baseline.js`;
+- this log.
+
+Not committed; not pushed. Branch `ml-integration`.
+
+## Tests (command and outcome)
+- `node services/test_demo_baseline.js` → 119 passed.
+- `PRISM_REQUIRE_DATASET=1 npm test` → exit 0 (counts above).
+- `gradlew :app:assembleDebug` → BUILD SUCCESSFUL.
+
+## Open issues / next step
+- Entries 27–30 are not committed.
+- The backup folders under `C:\CAPSTONE\backups\` contain the Firebase sign-in record. Delete them when no longer needed.
+
+# Entry 31 — 2026-10-21: Freeze and commit Entries 27–30
+
+## Objective
+At the owner's request ("freeze this and commit"), commit the state verified in Entries 27–30 as one commit on `ml-integration`. No code change in this entry.
+
+## What was inspected / changed
+- **Branch and starting point:** `ml-integration`, HEAD `fc08770`.
+- **Committed:** the 8 tracked files modified in Entries 27–30:
+  - `components/DemoBaselineCard.js`, `components/ResearchMeasurements.js`;
+  - `screens/DashboardScreen.js`;
+  - `services/demoBaseline.js`, `services/test_demo_baseline.js`;
+  - `utils/researchView.js`, `utils/test_recording_view.js`;
+  - `claude_implementation.md` (Entries 27–31).
+- **Not committed (untracked, left as they are):** `.claude/`, `PRISM_AUTONOMOUS_PROGRESS.md`, `experiments/`, `prompt.md`, `rnconfig.json`, `skills-lock.json`.
+- **Credentials:** `firebase/config.js` is ignored (`.gitignore` line 44) and not part of the commit. A scan of the diff for key, secret, password and token patterns found nothing.
+
+## Results (V = run)
+- **Tests:** `PRISM_REQUIRE_DATASET=1 npm test` → exit 0, immediately before the commit.
+  - harness all passed;
+  - contract 446, assessment 503, sessions 150, ble 102, split source 195, demo baseline 119, session view 266, recording view 76;
+  - 0 failed.
+- **Phone:** it runs exactly this code (Entry 30 build, APK `579dd7f2…`, installed in place; app data intact).
+
+## Files changed
+This log (Entry 31), committed together with the files above.
+
+## Tests (command and outcome)
+`PRISM_REQUIRE_DATASET=1 npm test` → exit 0 (counts above).
+
+## Open issues / next step
+- Not pushed.
+- The backup folders under `C:\CAPSTONE\backups\` contain the Firebase sign-in record. Delete them when no longer needed.

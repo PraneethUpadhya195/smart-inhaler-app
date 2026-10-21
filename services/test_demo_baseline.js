@@ -13,6 +13,8 @@
  *  8-10  idempotency per session; reopening screens cannot update; same reference in a new session
  *  11-13 persistence, reset scope, storage failures
  *  14-15 Stage 9 outputs and the Entry 19 selection unchanged
+ *  16-20 shown to users as "Personal Baseline": wording, the Dashboard summary (read-only, refreshed from
+ *        the stored state), reference recordings named by kind and original recording time, ids unchanged
  *
  * Run: node services/test_demo_baseline.js   (part of npm test)
  */
@@ -26,6 +28,7 @@ import { createRecordingWorkflow } from "./recordingWorkflow.js";
 import { analyseReferenceInput, analyseHardwareRecording } from "./hardwareSession.js";
 import {
   INHALATION_RECORDINGS, NO_INHALATION_RECORDING, SELECTION, createAnalysisSelector, pickAnalysisRecording, SELECTION_STATE_KEY,
+  ANALYSIS_RECORDINGS,
 } from "./analysisRecordings.js";
 import { createLocalSessionStore } from "./localSessionStore.js";
 import { mergeSessionLists } from "./syncService.js";
@@ -39,7 +42,10 @@ import { createNodePipeline } from "../pipeline/runtime/node.js";
 import { assessRecording, loadAssessmentReference } from "../pipeline/ReferenceAssessment.js";
 import { rmsZ } from "../pipeline/contract.js";
 import { V2_FEATURE_ORDER } from "../pipeline/versions.js";
-import { describeDemoBaseline } from "../utils/researchView.js";
+import {
+  describeDemoBaseline, describeBaselineSummary, referenceRecordingLabel, referenceRecordedAt, DEMO_BASELINE_EXPLANATION,
+} from "../utils/researchView.js";
+import { formatTimestamp } from "../utils/formatters.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 let passed = 0;
@@ -142,7 +148,7 @@ await test("1-2. The first eligible inhalation initializes the baseline, with no
   check(state1.last_deviation === null && c.deviation === null && c.baseline_before === null && s1.observed.outcome.deviation === null,
     "no distance is invented for the first session");
   const view = describeDemoBaseline({ state: state1, error: null }, s1.record);
-  check(view.stateLabel === "Initialized" && view.lastDistance === "—" && /initialized the demo baseline/.test(view.thisSession)
+  check(view.stateLabel === "Initialized" && view.lastDistance === "—" && /initialized the personal baseline/.test(view.thisSession)
     && /No distance was calculated/.test(view.thisSession), "the session screen says so");
 });
 
@@ -264,7 +270,7 @@ await test("11-12. Persistence and reset scope", async () => {
   check(json((await createLocalSessionStore(storage, { log: quiet }).listSessions()).entries) === sessionsBefore
     && storage.map.get(SELECTION_STATE_KEY) === json({ last_inhalation_id: A.id }), "sessions and the selection state are kept");
   const view = describeDemoBaseline(after, s1.record);
-  check(view.stateLabel === "Not initialized" && /not processed by the current demo baseline/.test(view.thisSession), "after a reset, old sessions are shown as not processed");
+  check(view.stateLabel === "Not initialized" && /not processed by the current personal baseline/.test(view.thisSession), "after a reset, old sessions are shown as not processed");
   const fresh = await restarted.observe(s1.record);
   check(fresh.outcome.action === DEMO_ACTION.INITIALIZED, "after a reset an already stored session would initialize it again only if observed again (the app observes only new sessions)");
 });
@@ -320,6 +326,144 @@ await test("15. Entry 19 selection and long press unchanged", () => {
     && /analyseReferenceInput\(getPipeline, recording, \{ analysisRecording, loadAnalysisBytes, audioFile \}\)/.test(ctx), "Start Event wiring unchanged");
   check((src("components/RecordingPanel.js").match(/onLongPress=\{onStartLong\}/g) ?? []).length === 3, "press and long press on the start controls");
   check(applyDemoBaseline && typeof applyDemoBaseline === "function", "the demo baseline is a separate module");
+});
+
+// ─── 16-20: presentation as "Personal Baseline" (no change to the baseline itself) ─────────────────
+
+const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+const code = (rel) => stripComments(src(rel));
+const oneSpace = (s) => s.replace(/\s/g, " "); // ICU may put a narrow no-break space before AM/PM
+
+await test("16. User-facing wording: \"Personal Baseline\", with an accurate explanation", async () => {
+  const card = code("components/DemoBaselineCard.js");
+  const dash = code("screens/DashboardScreen.js");
+  check(/>Personal Baseline</.test(card) && /Reset personal baseline/.test(card) && /Reset the personal baseline\?/.test(card)
+    && /This clears only the personal baseline and its processing record/.test(card) && /Personal baseline not reset/.test(card),
+    "session screen: title, reset control and confirmation say Personal Baseline");
+  check(/>Personal Baseline</.test(dash), "Dashboard: the Personal Baseline section");
+  check(![card, dash, code("utils/researchView.js"), code("screens/SessionDetailScreen.js")].some((s) => /demo baseline|demonstration/i.test(s)),
+    "no \"Demo Baseline\" wording left in the feature's screens");
+  const unreadable = memoryStorage();
+  unreadable.map.set(DEMO_BASELINE_KEY, "{broken");
+  const broken = await createDemoBaselineStore({ storage: unreadable, reference: REFERENCE, log: quiet }).load();
+  const failing = { ...memoryStorage(), async setItem() { throw new Error("disk full"); } };
+  const notSaved = await createDemoBaselineStore({ storage: failing, reference: REFERENCE, now: nowDate, log: quiet }).observe(s1.record);
+  check(broken.error === "The personal baseline could not be read. Reset it to start again." && notSaved.error === "The personal baseline could not be saved.",
+    "the storage messages shown on screen");
+  const views = [
+    describeDemoBaseline({ state: state1, error: null }, s1.record), describeDemoBaseline({ state: state2, error: null }, s2.record),
+    describeDemoBaseline({ state: emptyDemoBaseline(REFERENCE.referenceId), error: null }, s1.record),
+    describeBaselineSummary({ state: state3, error: null }), describeBaselineSummary({ state: emptyDemoBaseline(REFERENCE.referenceId), error: null }),
+  ];
+  check(views.every((v) => !/\bdemo\b|demo baseline|demonstration/i.test(json(v))), "no text of the session section or the Dashboard summary says demo");
+  check(DEMO_BASELINE_EXPLANATION === "Preliminary baseline derived from reference inhalation recordings. It demonstrates baseline "
+    + "initialization and adaptation and is not yet personalized to an individual's inhalation patterns."
+    && views.every((v) => v.explanation === DEMO_BASELINE_EXPLANATION), "explanation: derived from reference recordings, not yet personalized");
+  check(!/your own|your inhalation|learn|clinical|validated|quality|technique|score/i.test(DEMO_BASELINE_EXPLANATION),
+    "it claims no learning from the user's inhalations and no validated or quality score");
+});
+
+await test("17. Dashboard summary: not initialized, initialized, read-only", () => {
+  const dash = code("screens/DashboardScreen.js");
+  check(describeBaselineSummary({ state: null, error: null }) === null && describeBaselineSummary(undefined) === null, "nothing before the baseline is loaded");
+  const empty = describeBaselineSummary({ state: emptyDemoBaseline(REFERENCE.referenceId), error: null });
+  check(empty.stateLabel === "Not initialized" && empty.initialized === false && empty.sessionsProcessed === null && empty.uniqueReferences === null
+    && empty.lastDistance === null && empty.lastUpdated === null && empty.error === null, "not initialized: no counts, distance or time");
+  check(/\{baseline\?\.initialized && \(/.test(dash) && /baseline\?\.stateLabel \?\? "—"/.test(dash), "the Dashboard shows the rows only when initialized");
+  const one = describeBaselineSummary({ state: state1, error: null });
+  check(one.stateLabel === "Initialized" && one.sessionsProcessed === 1 && one.uniqueReferences === 1 && one.lastDistance === "—"
+    && one.lastUpdated === formatTimestamp(state1.updated_at), "after the first session: 1 session, 1 reference, no distance yet");
+  const three = describeBaselineSummary({ state: state3, error: null });
+  check(three.sessionsProcessed === state3.sessions_processed && three.sessionsProcessed === 3 && three.uniqueReferences === 2
+    && three.lastDistance === state3.last_deviation.toFixed(3), `the stored counts and the latest distance (${three.lastDistance})`);
+  check(state3.updated_at === state3.contributions[s3.record.session_id].at && three.lastUpdated === formatTimestamp(state3.updated_at)
+    && three.lastUpdated !== "—", `last update = the time of the last baseline update (${oneSpace(three.lastUpdated)})`);
+  check(describeBaselineSummary({ state: state3, error: "x" }).error === "x", "a storage error is passed through");
+  const before = json(state3);
+  for (let i = 0; i < 5; i++) describeBaselineSummary({ state: state3, error: null });
+  check(json(state3) === before, "building the summary changes nothing");
+  check(!/\.observe\(|\.reset\(|setItem|getItem|AsyncStorage|createDemoBaselineStore|resetDemoBaseline|setDemoBaseline/.test(dash),
+    "the Dashboard only reads the baseline (no update, reset or storage call)");
+  check(!/observe|createDemoBaselineStore/.test(src("screens/DashboardScreen.js")), "the Dashboard cannot update the baseline");
+});
+
+await test("18. The Dashboard summary follows the stored state after a new eligible session", async () => {
+  const dash = code("screens/DashboardScreen.js");
+  check(/demoBaseline,\s*\} = useAppContext\(\)/.test(dash) && /describeBaselineSummary\(demoBaseline\)/.test(dash), "the Dashboard reads AppContext.demoBaseline");
+  check(/setDemoBaseline\(\{ state: result\.state, error: result\.error \}\)/.test(src("context/AppContext.js")),
+    "AppContext replaces it with the state observe() returns after a session is stored");
+  // The same steps as the app: start-up load, then each stored session's observe() result becomes the context value.
+  const st = memoryStorage();
+  const d = createDemoBaselineStore({ storage: st, reference: REFERENCE, now: nowDate, log: quiet });
+  const start = describeBaselineSummary(await d.load());
+  const r1 = await startEvent({ storage: st, demo: d, pick: B });
+  const after1 = describeBaselineSummary({ state: r1.observed.state, error: r1.observed.error });
+  const r2 = await startEvent({ storage: st, demo: d, pick: A });
+  const after2 = describeBaselineSummary({ state: r2.observed.state, error: r2.observed.error });
+  check(start.stateLabel === "Not initialized" && after1.stateLabel === "Initialized" && after1.sessionsProcessed === 1 && after1.uniqueReferences === 1,
+    "first eligible session: Not initialized → Initialized");
+  check(after2.sessionsProcessed === 2 && after2.uniqueReferences === 2 && after2.lastDistance === r2.observed.outcome.deviation.toFixed(3)
+    && after2.lastUpdated === formatTimestamp(r2.observed.state.updated_at), "second session: counts, distance and time refreshed");
+  check(json(describeBaselineSummary(await d.load())) === json(after2), "the summary equals what a restart would load");
+  const long = await startEvent({ storage: st, demo: d, selection: SELECTION.NO_INHALATION });
+  check(json(describeBaselineSummary({ state: long.observed.state, error: long.observed.error })) === json(after2), "a long press leaves the summary as it was");
+  check(describeBaselineSummary(await d.reset()).stateLabel === "Not initialized", "after the existing reset: Not initialized");
+});
+
+await test("19-20. Reference recordings are named by kind and original recording time; ids unchanged", () => {
+  // 19. Source-recording times: from the dataset recording id (the dataset's file-name timestamp)
+  check(oneSpace(referenceRecordingLabel("ref-inhalation-01")) === "Inhalation reference — Jan 23, 2018, 11:00 AM"
+    && oneSpace(referenceRecordingLabel("ref-inhalation-06")) === "Inhalation reference — May 3, 2018, 11:43 AM"
+    && oneSpace(referenceRecordingLabel("ref-no-inhalation-01")) === "No-inhalation reference — Jan 23, 2018, 11:00 AM",
+    `labels: "${oneSpace(referenceRecordingLabel("ref-inhalation-06"))}", "${oneSpace(referenceRecordingLabel("ref-no-inhalation-01"))}"`);
+  for (const r of ANALYSIS_RECORDINGS) {
+    const [, y, mo, d, h, mi, s] = /^rec(\d{4})-(\d{2})-(\d{2})_(\d{2})h(\d{2})m(\d{2})\.\d{3}s\.wav$/.exec(r.recordingId).map(Number);
+    const t = referenceRecordedAt(r.recordingId);
+    check(t && t.getFullYear() === y && t.getMonth() + 1 === mo && t.getDate() === d && t.getHours() === h && t.getMinutes() === mi && t.getSeconds() === s
+      && referenceRecordingLabel(r.id).endsWith(formatTimestamp(t)), `${r.id}: recorded ${r.recordingId}`);
+  }
+  // Session times are never used: the label depends only on the reference.
+  for (const s of [s1, s2, s3]) {
+    const label = referenceRecordingLabel(s.record.analysis_source.reference_id);
+    check(/2018/.test(label) && !/2026/.test(label), `${s.record.session_id}: the 2018 recording time, not the 2026 session time`);
+  }
+  check(referenceRecordingLabel(s1.record.analysis_source.reference_id) === referenceRecordingLabel(s3.record.analysis_source.reference_id),
+    "two sessions with the same reference at different times: the same label");
+  // 20. Fallbacks: no usable recording time → a generic name, never a date
+  const registry = [
+    { id: "x-inhalation", selection: SELECTION.INHALATION, recordingId: "inhale_take_3.wav" },
+    { id: "x-no-inhalation", selection: SELECTION.NO_INHALATION, recordingId: null },
+    { id: "x-impossible", selection: SELECTION.INHALATION, recordingId: "rec2018-02-31_11h00m14.641s.wav" },
+  ];
+  check(referenceRecordingLabel("x-inhalation", registry) === "Inhalation reference recording"
+    && referenceRecordingLabel("x-no-inhalation", registry) === "No-inhalation reference recording"
+    && referenceRecordingLabel("x-impossible", registry) === "Inhalation reference recording", "no time, or an impossible date: generic name");
+  check(referenceRecordingLabel("ref-unknown") === "Reference recording" && referenceRecordingLabel(null) === "—" && referenceRecordingLabel(undefined) === "—"
+    && referenceRecordedAt("rec2018-01-23_25h00m14.641s.wav") === null && referenceRecordedAt(42) === null, "unknown or missing reference");
+  // Ids unchanged; the stored state keeps ids, never labels; contributions stay keyed by session id
+  check(json(ANALYSIS_RECORDINGS.map((r) => [r.id, r.asset])) === json([
+    ...[1, 2, 3, 4, 5, 6, 7, 8].map((i) => [`ref-inhalation-0${i}`, `demo_recordings/demo_0${i}.wav`]),
+    ["ref-no-inhalation-01", "analysis_recordings/no_inhalation_01.wav"],
+  ]), "reference ids and WAV assets unchanged");
+  check(state3.last_reference_id === A.id && json(state3.unique_reference_ids) === json([A.id, B.id])
+    && json(Object.keys(state3.contributions)) === json([s1, s2, s3].map((s) => s.record.session_id)), "the state stores ids and is keyed by session id");
+  const view = describeDemoBaseline({ state: state3, error: null }, s3.record);
+  check(view.lastReference === referenceRecordingLabel(A.id) && !/ref-|\.wav/.test(json(view)), `session screen: "${oneSpace(view.lastReference)}", not the id`);
+  check(describeDemoBaseline({ state: { ...state3, last_reference_id: "ref-gone" }, error: null }, s3.record).lastReference === "Reference recording"
+    && describeDemoBaseline({ state: emptyDemoBaseline(REFERENCE.referenceId), error: null }, s1.record).lastReference === "—", "session screen fallbacks");
+});
+
+await test("21. Session-screen card layout: the long reference label gets its own line", () => {
+  // No React renderer is installed for tests: the layout is checked in the component source.
+  const card = code("components/DemoBaselineCard.js");
+  const rows = [...card.matchAll(/<Row label="([^"]+)" value=\{[^}]+\}( stacked)? \/>/g)].map((m) => [m[1], Boolean(m[2])]);
+  check(json(rows) === json([["State", false], ["Eligible sessions processed", false], ["Unique reference recordings", false],
+    ["Most recent reference", true], ["Most recent distance (before update)", false]]), "only the reference row is stacked; the other rows keep label and value side by side");
+  check(/style=\{\[styles\.row, stacked && styles\.rowStacked\]\}/.test(card)
+    && /rowStacked: \{ flexDirection: "column", alignItems: "flex-start"/.test(card), "stacked row: label above value, both at full card width");
+  check(/row: \{\s*flexDirection: "row",\s*justifyContent: "space-between"/.test(card) && /rowLabel: \{ color: COLORS\.textSecondary, fontSize: 14, flexShrink: 1 \}/.test(card)
+    && /rowValue: \{ color: COLORS\.text, fontSize: 14, fontWeight: "600" \}/.test(card), "row, label and value styles otherwise unchanged");
+  check(referenceRecordingLabel("ref-inhalation-06").length > 40, "the reference value is long enough to need its own line");
 });
 
 console.log(`\n${passed} checks passed, ${failed} failed`);

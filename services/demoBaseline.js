@@ -162,7 +162,7 @@ export function createDemoBaselineStore({ storage, reference = loadAssessmentRef
       return { state: validateDemoBaseline(JSON.parse(raw), reference.referenceId), error: null };
     } catch (e) {
       log.warn?.("[demoBaseline] stored demo baseline not usable:", e?.message ?? e);
-      return { state: emptyDemoBaseline(reference.referenceId), error: "The demo baseline could not be read. Reset it to start again." };
+      return { state: emptyDemoBaseline(reference.referenceId), error: "The personal baseline could not be read. Reset it to start again." };
     }
   }
 
@@ -193,7 +193,7 @@ export function createDemoBaselineStore({ storage, reference = loadAssessmentRef
         } catch (e) {
           log.warn?.("[demoBaseline] demo baseline not saved:", e?.message ?? e);
           return { outcome: { action: DEMO_ACTION.SKIPPED, reason: "the demo baseline could not be saved", deviation: null },
-            state: loaded.state, error: "The demo baseline could not be saved." };
+            state: loaded.state, error: "The personal baseline could not be saved." };
         }
         return { outcome: { action: contribution.action, reason: null, deviation: contribution.deviation }, state, error: null };
       });

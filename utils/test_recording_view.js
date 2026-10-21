@@ -165,6 +165,26 @@ check(describeResearch(datasetRecord).caveat === null, "no hardware caveat for r
 check(describeResearch(demoRecord).available === false, "sessions without Stage 9 output: not available");
 for (const [v, label] of [[r1, "research single"], [r2, "research outside"], [r3, "research none"]]) checkWording(v, label);
 check(Object.values(RANGE_TEXT).every((t) => !/\b(normal|abnormal|anomal)/i.test(t)), "range texts use the research wording only");
+// The research section no longer shows the V3 personal-baseline status: the Personal Baseline card is the
+// only baseline status on the session screen. No React renderer is installed for tests, so the rendering
+// source is checked (comments removed), as in utils/test_session_view.js.
+const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+const ui = (rel) => stripComments(fs.readFileSync(path.join(ROOT, rel), "utf8"));
+const section = ui("components/ResearchMeasurements.js");
+check(!/research\.personal|Personal baseline|PERSONAL_BLOCKER_TEXT/i.test(section), "research section: no personal-baseline status line");
+check(["Research measurements", "research.caveat", "research.interpretation", "No inhalation was detected, so nothing was measured.",
+  "No research measurements exist for this session.", "Acoustic deviation: {ev.deviation}", "ev.rangeText", "ev.reliabilityText", "ev.tailText",
+  "Largest contribution: {ev.largestContribution}"].every((s) => section.includes(s)),
+  "research section: caveat, interpretation and every event measurement still rendered");
+const detailScreen = ui("screens/SessionDetailScreen.js");
+check(/<ResearchMeasurements research=\{research\} \/>/.test(detailScreen) && /<DemoBaselineCard view=\{demo\} onReset=\{resetDemoBaseline\} \/>/.test(detailScreen)
+  && /describeDemoBaseline\(demoBaseline, session\)/.test(detailScreen), "session screen: research section and Personal Baseline card both rendered");
+const card = ui("components/DemoBaselineCard.js");
+check([">Personal Baseline<", "view.explanation", "view.error", 'label="State"', 'label="Eligible sessions processed"', 'label="Unique reference recordings"',
+  'label="Most recent reference"', 'label="Most recent distance (before update)"', "view.thisSession", "onPress={confirmReset}",
+  "Reset personal baseline", "Reset the personal baseline?", "onReset()"].every((s) => card.includes(s)),
+  "Personal Baseline card: title, explanation, error, status, counts, distance, reset with confirmation");
+check(r1.personal?.status === "Not available", "the V3 status stays in the session data (only its display was removed)");
 
 // ─── 4. Trends ───────────────────────────────────────────────────────────────
 console.log("4. Trends");

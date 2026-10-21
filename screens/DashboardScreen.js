@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 import {
   View,
   Text,
@@ -6,31 +6,24 @@ import {
   ScrollView,
   TouchableOpacity,
   ActivityIndicator,
-  Alert,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useAppContext } from "../context/AppContext";
-import { runSimulatedSession } from "../services/simulationService";
-import { runDemoSession } from "../services/demoRecordings";
-import { getPipeline } from "../services/inferenceService";
 import ResultBadge from "../components/ResultBadge";
 import StatusTag from "../components/StatusTag";
 import RecordingPanel from "../components/RecordingPanel";
 import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
 import { formatTimestamp } from "../utils/formatters";
 import { describeSession, describeSyncStatus } from "../utils/sessionView";
-import { PERSONAL_BLOCKER_TEXT } from "../utils/researchView";
+import { describeBaselineSummary } from "../utils/researchView";
 
 export default function DashboardScreen({ navigation }) {
   const {
-    sessions, addNewSession, deviceStatus, deviceName, syncStatus, syncNow, localStoreError,
-    recordingState, startEvent, dismissRecording, settings,
+    sessions, deviceStatus, deviceName, syncStatus, syncNow, localStoreError,
+    recordingState, startEvent, dismissRecording, settings, demoBaseline,
   } = useAppContext();
-  const [isSimulating, setIsSimulating] = useState(false);
-  const [isAnalysingDemo, setIsAnalysingDemo] = useState(false);
-  const recordingActive = !["IDLE", "COMPLETED", "ERROR"].includes(recordingState.phase);
-  const busy = isSimulating || isAnalysingDemo || recordingActive;
-  const latestDevicePersonal = sessions.find((s) => s.source === "ble" && s.personal)?.personal ?? null;
+  // Read-only view of the stored baseline; AppContext updates it when a session is stored or it is reset.
+  const baseline = describeBaselineSummary(demoBaseline);
 
   function openSession(id, fallback) {
     const session = sessions.find((s) => s.id === id) ?? fallback;
@@ -45,41 +38,6 @@ export default function DashboardScreen({ navigation }) {
 
   const lastSession = sessions[0] || null;
   const pendingCount = sessions.filter((s) => s.sync?.state === "pending").length;
-
-  async function handleSimulate() {
-    setIsSimulating(true);
-    try {
-      // The real on-device pipeline on synthetic test audio. The session is stored on this
-      // phone at once; the upload to Firestore runs in the background.
-      const session = await runSimulatedSession(getPipeline);
-      await addNewSession(session);
-    } catch (e) {
-      Alert.alert("Session not saved", `The session could not be stored on this phone: ${e?.message ?? e}`);
-      console.error(e);
-    } finally {
-      setIsSimulating(false);
-    }
-  }
-
-  async function handleDemo() {
-    setIsAnalysingDemo(true);
-    try {
-      // The real on-device pipeline on a reference dataset recording bundled with the app. The
-      // session is stored like any other; its detail screen opens with the recording's waveform.
-      const session = await runDemoSession(getPipeline);
-      const id = await addNewSession(session);
-      navigation.navigate("History", {
-        screen: "SessionDetail",
-        params: { session: { ...session, id, timestamp: new Date(), sync: { state: "pending" } } },
-        initial: false,
-      });
-    } catch (e) {
-      Alert.alert("Demo not saved", `The demo recording could not be analysed or stored: ${e?.message ?? e}`);
-      console.error(e);
-    } finally {
-      setIsAnalysingDemo(false);
-    }
-  }
 
   return (
     <ScrollView
@@ -157,66 +115,21 @@ export default function DashboardScreen({ navigation }) {
         )}
       </View>
 
-      {/* Personal baseline status (research V3: not available) */}
+      {/* Personal Baseline summary (utils/researchView.describeBaselineSummary; reset is on the session screen) */}
       <View style={[styles.card, SHADOW.card]}>
-        <Text style={styles.cardTitle}>Personal baseline</Text>
-        <Text style={styles.syncText}>Not available</Text>
-        <Text style={styles.description}>
-          {PERSONAL_BLOCKER_TEXT.SITTING_DEFINITION_INCOMPATIBLE} {PERSONAL_BLOCKER_TEXT.NOT_VALIDATED}
-        </Text>
-        {latestDevicePersonal && Number.isInteger(latestDevicePersonal.n_sittings) && (
-          <Text style={styles.timestamp}>
-            This device: {latestDevicePersonal.n_sittings} sitting(s) recorded, {latestDevicePersonal.n_qualifying_sittings} of {latestDevicePersonal.s_min} would qualify.
-          </Text>
+        <Text style={styles.cardTitle}>Personal Baseline</Text>
+        <Text style={styles.syncText}>{baseline?.stateLabel ?? "—"}</Text>
+        {baseline && <Text style={styles.description}>{baseline.explanation}</Text>}
+        {baseline?.error && <Text style={styles.errorText}>{baseline.error}</Text>}
+        {baseline?.initialized && (
+          <View>
+            <SummaryRow label="Eligible sessions processed" value={String(baseline.sessionsProcessed)} />
+            <SummaryRow label="Unique reference recordings" value={String(baseline.uniqueReferences)} />
+            <SummaryRow label="Most recent distance (before update)" value={baseline.lastDistance} />
+            <SummaryRow label="Last updated" value={baseline.lastUpdated ?? "—"} />
+          </View>
         )}
       </View>
-
-      {/* Demo and test: separate from the device recording, labelled as such */}
-      <Text style={styles.sectionLabel}>Demo and test (not device recordings)</Text>
-
-      {/* Simulated session button */}
-      <TouchableOpacity
-        style={[styles.simulateBtn, styles.simulateSecondary, busy && styles.btnDisabled]}
-        onPress={handleSimulate}
-        disabled={busy}
-        activeOpacity={0.8}
-      >
-        {isSimulating ? (
-          <ActivityIndicator color="#fff" />
-        ) : (
-          <>
-            <Ionicons name="play-circle-outline" size={20} color="#fff" />
-            <Text style={styles.simulateBtnText}>Run Simulated Session</Text>
-          </>
-        )}
-      </TouchableOpacity>
-
-      <Text style={styles.hint}>
-        Runs the on-device analysis on synthetic test audio (not a recording of an inhalation).
-        The session is saved on this phone and uploaded to the cloud when a connection is available.
-      </Text>
-
-      {/* Demo recording button */}
-      <TouchableOpacity
-        style={[styles.simulateBtn, styles.demoBtn, busy && styles.btnDisabled]}
-        onPress={handleDemo}
-        disabled={busy}
-        activeOpacity={0.8}
-      >
-        {isAnalysingDemo ? (
-          <ActivityIndicator color="#fff" />
-        ) : (
-          <>
-            <Ionicons name="musical-notes-outline" size={20} color="#fff" />
-            <Text style={styles.simulateBtnText}>Analyse Demo Recording</Text>
-          </>
-        )}
-      </TouchableOpacity>
-
-      <Text style={styles.hint}>
-        Runs the on-device analysis on a recording from the PRISM reference dataset that is bundled
-        with the app (not recorded with this phone). The session is saved and uploaded like any other.
-      </Text>
     </ScrollView>
   );
 }
@@ -259,6 +172,15 @@ function MiniStat({ icon, value, label }) {
   );
 }
 
+function SummaryRow({ label, value }) {
+  return (
+    <View style={styles.summaryRow}>
+      <Text style={styles.summaryLabel}>{label}</Text>
+      <Text style={styles.summaryValue}>{value}</Text>
+    </View>
+  );
+}
+
 function getTimeOfDay() {
   const h = new Date().getHours();
   if (h < 12) return "morning";
@@ -286,15 +208,6 @@ const styles = StyleSheet.create({
   },
   deviceBannerText: { fontSize: 13, fontWeight: "500", flex: 1 },
   bannerChevron: { marginLeft: "auto" },
-  sectionLabel: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: COLORS.textMuted,
-    textTransform: "uppercase",
-    letterSpacing: 1,
-    marginTop: SPACING.sm,
-    marginBottom: SPACING.sm,
-  },
 
   card: {
     backgroundColor: COLORS.surface,
@@ -342,22 +255,20 @@ const styles = StyleSheet.create({
   miniStatValue: { fontSize: 18, fontWeight: "700", color: COLORS.text },
   miniStatLabel: { fontSize: 11, color: COLORS.textMuted },
 
+  summaryRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: SPACING.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+    gap: SPACING.sm,
+  },
+  summaryLabel: { color: COLORS.textSecondary, fontSize: 14, flexShrink: 1 },
+  summaryValue: { color: COLORS.text, fontSize: 14, fontWeight: "600" },
+
   emptyText: { color: COLORS.textMuted, fontSize: 14, textAlign: "center", paddingVertical: SPACING.md },
 
-  simulateBtn: {
-    backgroundColor: COLORS.primary,
-    borderRadius: RADIUS.lg,
-    padding: SPACING.md,
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    gap: SPACING.sm,
-    marginBottom: SPACING.sm,
-  },
-  demoBtn: { backgroundColor: COLORS.tagBle, marginTop: SPACING.md },
-  simulateSecondary: { backgroundColor: COLORS.tagSim },
   btnDisabled: { opacity: 0.6 },
-  simulateBtnText: { color: "#fff", fontSize: 16, fontWeight: "700" },
 
-  hint: { textAlign: "center", color: COLORS.textMuted, fontSize: 12 },
 });

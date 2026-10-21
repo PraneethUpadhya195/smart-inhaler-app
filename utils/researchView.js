@@ -16,6 +16,8 @@
 
 import { loadAssessmentReference } from "../pipeline/ReferenceAssessment.js";
 import { demoBaselineInput } from "../services/demoBaseline.js";
+import { ANALYSIS_RECORDINGS, SELECTION } from "../services/analysisRecordings.js";
+import { formatTimestamp } from "./formatters.js";
 
 export const RANGE_TEXT = Object.freeze({
   WITHIN_REFERENCE_RANGE: "Acoustically within the range of the reference recordings",
@@ -100,16 +102,79 @@ export function describeResearch(session) {
   };
 }
 
-// ─── Demo Baseline (services/demoBaseline.js) ────────────────────────────────
+// ─── Personal Baseline (services/demoBaseline.js) ────────────────────────────
+// Shown to users as "Personal Baseline". Internally it is still the demo baseline (module, storage key and
+// data model unchanged): derived from reference recordings, not from the user's own inhalations, and kept
+// apart from the per-user baseline (V3, pipeline/PersonalReferenceStatus.js).
 
 export const DEMO_BASELINE_EXPLANATION =
-  "Demonstration baseline calculated from eligible reference inhalations. It illustrates baseline initialization and " +
-  "adaptation; it is not a personalized baseline or a clinically validated score.";
+  "Preliminary baseline derived from reference inhalation recordings. It demonstrates baseline initialization and " +
+  "adaptation and is not yet personalized to an individual's inhalation patterns.";
+
+/** The reference dataset names each recording by its recording time, recYYYY-MM-DD_HHhMMmSS.sss.wav (no time zone). */
+const DATASET_RECORDING_TIME = /^rec(\d{4})-(\d{2})-(\d{2})_(\d{2})h(\d{2})m(\d{2})\.(\d{3})s\.wav$/;
+
+/**
+ * When a reference recording was originally recorded, from its dataset recording id: the dataset's only
+ * time metadata (research PRISM_RESEARCH_LOG.md, metadata audit: the WAVs carry no metadata, file names
+ * are timestamps). The dataset gives no time zone, so the time is kept as written, not converted.
+ * @param {string} recordingId - e.g. "rec2018-01-23_11h00m14.641s.wav"
+ * @returns {Date|null} null when the id does not follow the pattern or is not a valid time
+ */
+export function referenceRecordedAt(recordingId) {
+  const m = DATASET_RECORDING_TIME.exec(typeof recordingId === "string" ? recordingId : "");
+  if (!m) return null;
+  const [y, mo, d, h, mi, s, ms] = m.slice(1).map(Number);
+  const t = new Date(y, mo - 1, d, h, mi, s, ms);
+  const valid = t.getFullYear() === y && t.getMonth() === mo - 1 && t.getDate() === d
+    && t.getHours() === h && t.getMinutes() === mi && t.getSeconds() === s;
+  return valid ? t : null;
+}
+
+/**
+ * The user-facing name of a bundled reference recording (services/analysisRecordings.js) in place of its
+ * internal id: its kind and its original recording time, e.g. "Inhalation reference — Jan 23, 2018, 11:00 AM".
+ * Without a usable recording time, a generic name; never a session's time. Presentational only: the id
+ * stays the key everywhere.
+ * @param {string|null} referenceId - e.g. "ref-inhalation-06"
+ * @param {Object[]} [registry] - ANALYSIS_RECORDINGS (tests)
+ */
+export function referenceRecordingLabel(referenceId, registry = ANALYSIS_RECORDINGS) {
+  if (referenceId == null) return "—";
+  const r = registry.find((x) => x.id === referenceId);
+  const kind = r?.selection === SELECTION.INHALATION ? "Inhalation reference"
+    : r?.selection === SELECTION.NO_INHALATION ? "No-inhalation reference" : "Reference";
+  const at = r ? referenceRecordedAt(r.recordingId) : null;
+  return at ? `${kind} — ${formatTimestamp(at)}` : `${kind} recording`;
+}
+
+/**
+ * The Personal Baseline summary of the Dashboard: the stored state as it is, never recalculated, and
+ * read-only (the baseline changes only when a session is stored, context/AppContext.js `save`).
+ * Counts, distance and time are given only once the baseline is initialized.
+ * @param {{ state: Object|null, error: string|null }} demo - AppContext.demoBaseline
+ * @returns {Object|null} null until the baseline has been loaded
+ */
+export function describeBaselineSummary(demo) {
+  const state = demo?.state;
+  if (!state) return null;
+  const initialized = state.initialized === true;
+  return {
+    explanation: DEMO_BASELINE_EXPLANATION,
+    error: demo.error ?? null,
+    initialized,
+    stateLabel: initialized ? "Initialized" : "Not initialized",
+    sessionsProcessed: initialized ? state.sessions_processed : null,
+    uniqueReferences: initialized ? state.unique_reference_ids.length : null,
+    lastDistance: initialized ? (num(state.last_deviation)?.toFixed(3) ?? "—") : null,
+    lastUpdated: initialized && state.updated_at ? formatTimestamp(state.updated_at) : null,
+  };
+}
 
 let demoReference = null;
 
 /**
- * The Demo Baseline section of a session screen: the baseline's state and what this session did to it.
+ * The Personal Baseline section of a session screen: the baseline's state and what this session did to it.
  * Read-only: it never updates the baseline (that happens once, when a session is stored).
  * @param {{ state: Object|null, error: string|null }} demo - AppContext.demoBaseline
  * @param {Object} session - history item
@@ -123,13 +188,13 @@ export function describeDemoBaseline(demo, session) {
   const c = sessionId ? state.contributions?.[sessionId] : null;
   let thisSession;
   if (c?.action === "initialized") {
-    thisSession = "This session initialized the demo baseline. No distance was calculated: there was no earlier baseline.";
+    thisSession = "This session initialized the personal baseline. No distance was calculated: there was no earlier baseline.";
   } else if (c?.action === "updated") {
-    thisSession = `This session updated the demo baseline. Distance from the baseline before the update: ${num(c.deviation)?.toFixed(3) ?? "—"}.`;
+    thisSession = `This session updated the personal baseline. Distance from the baseline before the update: ${num(c.deviation)?.toFixed(3) ?? "—"}.`;
   } else {
     const input = demoBaselineInput(session, demoReference);
     thisSession = input.eligible
-      ? "This session was not processed by the current demo baseline (it was recorded before the baseline started or before its last reset)."
+      ? "This session was not processed by the current personal baseline (it was recorded before the baseline started or before its last reset)."
       : `This session was skipped: ${input.reason}.`;
   }
   return {
@@ -138,7 +203,7 @@ export function describeDemoBaseline(demo, session) {
     stateLabel: state.initialized ? "Initialized" : "Not initialized",
     sessionsProcessed: state.sessions_processed,
     uniqueReferences: state.unique_reference_ids.length,
-    lastReference: state.last_reference_id ?? "—",
+    lastReference: referenceRecordingLabel(state.last_reference_id),
     lastDistance: num(state.last_deviation)?.toFixed(3) ?? "—",
     thisSession,
   };

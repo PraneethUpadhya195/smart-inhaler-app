@@ -55,15 +55,6 @@ export default function ResearchMeasurements({ research }) {
               )}
             </View>
           ))}
-          {research.personal && (
-            <View style={styles.event}>
-              <Text style={styles.eventTitle}>Personal baseline: {research.personal.status}</Text>
-              {research.personal.detail && <Text style={styles.small}>{research.personal.detail}</Text>}
-              {research.personal.reasons.map((r) => (
-                <Text key={r} style={styles.small}>• {r}</Text>
-              ))}
-            </View>
-          )}
         </View>
       )}
     </View>
