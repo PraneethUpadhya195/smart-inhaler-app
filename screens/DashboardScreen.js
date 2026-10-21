@@ -24,7 +24,7 @@ import { PERSONAL_BLOCKER_TEXT } from "../utils/researchView";
 export default function DashboardScreen({ navigation }) {
   const {
     sessions, addNewSession, deviceStatus, deviceName, syncStatus, syncNow, localStoreError,
-    recordingState, startOnBoardRecording, dismissRecording, settings,
+    recordingState, startEvent, dismissRecording, settings,
   } = useAppContext();
   const [isSimulating, setIsSimulating] = useState(false);
   const [isAnalysingDemo, setIsAnalysingDemo] = useState(false);
@@ -118,7 +118,8 @@ export default function DashboardScreen({ navigation }) {
         deviceStatus={deviceStatus}
         deviceName={deviceName}
         recordingSeconds={settings.recordingSeconds}
-        onStart={() => startOnBoardRecording()}
+        onStart={() => startEvent({ long: false })}
+        onStartLong={() => startEvent({ long: true })}
         onConnect={() => navigation.navigate("Device")}
         onViewResult={handleViewRecordingResult}
         onDismiss={dismissRecording}

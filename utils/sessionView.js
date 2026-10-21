@@ -8,7 +8,8 @@
  *   - event start/end times and durations;
  *   - not-scoreable reasons, phrased as measurement conditions;
  *   - input and processing errors;
- *   - whether the session is simulated or legacy, synced or waiting to sync.
+ *   - whether the session is simulated or legacy, synced or waiting to sync;
+ *   - for a Start Event session, that its analysis input was a reference recording.
  * Nothing else from the record is copied into the view, so per-event measurements and the
  * internal diagnostics cannot reach a screen. No threshold exists and none is applied here.
  */
@@ -78,6 +79,9 @@ export const SOURCE_TEXT = Object.freeze({
   ble: "PRISM device (BLE)",
 });
 
+/** Shown with the analysis of a Start Event session (session.analysis_source, services/analysisRecordings.js). */
+export const REFERENCE_INPUT_CAPTION = "Analysis input: reference recording";
+
 export const SYNC_TEXT = Object.freeze({
   synced: "Synced",
   pending: "Not synced yet",
@@ -116,6 +120,8 @@ export function describeSession(session) {
     sourceLabel: SOURCE_TEXT[source] ?? (source ? source : "Unknown source"),
     savedAt: dateOrNull(session?.timestamp),
     sync: describeSync(session?.sync),
+    // Explicit metadata only (never inferred); sessions without analysis_source analysed their own audio.
+    analysisCaption: !legacy && session?.analysis_source?.type === "reference_recording" ? REFERENCE_INPUT_CAPTION : null,
   };
 
   if (legacy) {

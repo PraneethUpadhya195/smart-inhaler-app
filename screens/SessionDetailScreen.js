@@ -7,6 +7,7 @@ import ResultBadge from "../components/ResultBadge";
 import StatusTag from "../components/StatusTag";
 import Waveform from "../components/Waveform";
 import CaptureCard from "../components/CaptureCard";
+import RecordingPlayback from "../components/RecordingPlayback";
 import ResearchMeasurements from "../components/ResearchMeasurements";
 import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
 import { formatTimestamp, formatTime } from "../utils/formatters";
@@ -23,8 +24,9 @@ export default function SessionDetailScreen({ route }) {
   const capture = describeCapture(session);
   const research = !view.legacy && !view.simulated ? describeResearch(session) : null;
 
-  // The recording behind the session: a bundled demo recording, or a PRISM device recording kept
-  // on this phone (null for simulated and legacy sessions).
+  // The recording behind the session's analysis: a bundled demo recording, a PRISM device recording
+  // kept on this phone, or for a Start Event session the reference recording it was analysed from
+  // (null for simulated and legacy sessions). Playback is always the device recording (capture).
   const [waveform, setWaveform] = useState(null);
   useEffect(() => {
     let active = true;
@@ -87,22 +89,24 @@ export default function SessionDetailScreen({ route }) {
         {view.sync.detail && <Text style={styles.small}>Last attempt: {view.sync.detail}</Text>}
       </View>
 
-      {/* The recording: waveform with the detected events */}
-      {waveform && (
+      {/* The recording: waveform with the detected events, and playback of the device recording */}
+      {(waveform || capture?.audioFile) && (
         <View style={[styles.card, SHADOW.card]}>
           <Text style={styles.sectionTitle}>Recording</Text>
-          {waveform.missing ? (
+          {waveform?.missing ? (
             <Text style={styles.small}>{waveform.missing}</Text>
-          ) : (
+          ) : waveform ? (
             <>
-              <Text style={styles.small}>{waveform.label}</Text>
+              {waveform.label && <Text style={styles.small}>{waveform.label}</Text>}
               <Waveform
                 peaks={waveform.peaks}
                 durationS={waveform.durationS}
                 events={view.events.filter((ev) => ev.recordingNumber === null)}
               />
             </>
-          )}
+          ) : null}
+          {view.analysisCaption && <Text style={styles.small}>{view.analysisCaption}</Text>}
+          {capture?.audioFile && <RecordingPlayback file={capture.audioFile} />}
         </View>
       )}
 

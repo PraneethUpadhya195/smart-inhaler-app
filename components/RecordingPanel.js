@@ -9,10 +9,14 @@ import { describeRecordingState, STEPS } from "../utils/recordingView";
  * lifecycle of the recording (utils/recordingView.js), its progress, and the error with the next
  * action. It never falls back to another audio source.
  *
+ * Every start control (Start Event, Try again, Record again) has the same two gestures: a press calls
+ * onStart, a long press calls onStartLong. A long press cancels the press (React Native Pressability),
+ * so one gesture never starts both.
+ *
  * @param {{ state: Object, deviceStatus: string, deviceName: string|null, recordingSeconds: number,
- *   onStart: Function, onConnect: Function, onViewResult: Function, onDismiss: Function }} props
+ *   onStart: Function, onStartLong: Function, onConnect: Function, onViewResult: Function, onDismiss: Function }} props
  */
-export default function RecordingPanel({ state, deviceStatus, deviceName, recordingSeconds, onStart, onConnect, onViewResult, onDismiss }) {
+export default function RecordingPanel({ state, deviceStatus, deviceName, recordingSeconds, onStart, onStartLong, onConnect, onViewResult, onDismiss }) {
   const view = describeRecordingState(state);
   const connected = deviceStatus === "Connected";
   // After a lost connection: once a device is connected again, retrying is the next step.
@@ -30,9 +34,15 @@ export default function RecordingPanel({ state, deviceStatus, deviceName, record
               ? `${deviceName ?? "PRISM device"} is connected. Press the button, then use the inhaler: the device records ${recordingSeconds} s.`
               : "Records with the PRISM inhaler device over Bluetooth. If no device is connected, the app connects to the nearest one first."}
           </Text>
-          <TouchableOpacity style={styles.primaryBtn} onPress={onStart} activeOpacity={0.8}>
+          <TouchableOpacity
+            style={styles.primaryBtn}
+            onPress={onStart}
+            onLongPress={onStartLong}
+            delayLongPress={LONG_PRESS_MS}
+            activeOpacity={0.8}
+          >
             <Ionicons name="mic-outline" size={20} color="#fff" />
-            <Text style={styles.primaryBtnText}>Test On-Board Recording</Text>
+            <Text style={styles.primaryBtnText}>Start Event</Text>
           </TouchableOpacity>
           {!connected && (
             <TouchableOpacity style={styles.linkBtn} onPress={onConnect} activeOpacity={0.7}>
@@ -81,9 +91,9 @@ export default function RecordingPanel({ state, deviceStatus, deviceName, record
 
           <View style={styles.actions}>
             {view.actions.viewResult && <Action icon="document-text-outline" label="View result" onPress={onViewResult} filled />}
-            {showRetry && <Action icon="refresh-outline" label="Try again" onPress={onStart} filled />}
+            {showRetry && <Action icon="refresh-outline" label="Try again" onPress={onStart} onLongPress={onStartLong} filled />}
             {showConnect && <Action icon="bluetooth-outline" label="Connect device" onPress={onConnect} filled />}
-            {view.actions.start && view.phase === "COMPLETED" && <Action icon="mic-outline" label="Record again" onPress={onStart} />}
+            {view.actions.start && view.phase === "COMPLETED" && <Action icon="mic-outline" label="Record again" onPress={onStart} onLongPress={onStartLong} />}
             {view.actions.dismiss && <Action icon="close-outline" label="Close" onPress={onDismiss} />}
           </View>
         </>
@@ -92,11 +102,16 @@ export default function RecordingPanel({ state, deviceStatus, deviceName, record
   );
 }
 
-function Action({ icon, label, onPress, filled = false }) {
+/** How long a press must be held to count as a long press. */
+const LONG_PRESS_MS = 600;
+
+function Action({ icon, label, onPress, onLongPress, filled = false }) {
   return (
     <TouchableOpacity
       style={[styles.actionBtn, filled ? styles.actionFilled : styles.actionOutline]}
       onPress={onPress}
+      onLongPress={onLongPress}
+      delayLongPress={onLongPress ? LONG_PRESS_MS : undefined}
       activeOpacity={0.8}
     >
       <Ionicons name={icon} size={16} color={filled ? "#fff" : COLORS.primary} />

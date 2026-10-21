@@ -15,7 +15,7 @@ export const STEPS = Object.freeze([
   { phase: "COMPLETED", label: "Done" },
 ]);
 
-const STEP_INDEX = { IDLE: -1, CONNECTING: 0, READY: 0, RECORDING: 1, TRANSFERRING: 2, ANALYSING: 3, COMPLETED: 4 };
+const STEP_INDEX = { IDLE: -1, CONNECTING: 0, READY: 0, RECORDING: 1, TRANSFERRING: 2, SAVING: 2, ANALYSING: 3, COMPLETED: 4 };
 
 /** Recorder and workflow error codes → what the user can do about them. */
 export const ERROR_TEXT = Object.freeze({
@@ -35,6 +35,8 @@ export const ERROR_TEXT = Object.freeze({
   CRC_MISMATCH: "The received audio failed its checksum, so it was not analysed.",
   ABORTED: "The recording was stopped.",
   ANALYSIS_FAILED: "The recording could not be analysed or saved.",
+  SELECTION_FAILED: "The analysis could not be prepared, so no recording was started.",
+  STORAGE_FAILED: "The recording could not be saved on this phone, so it was not analysed.",
 });
 
 const seconds = (samples) => (Number.isFinite(samples) ? samples / 8000 : null);
@@ -84,6 +86,8 @@ export function describeRecordingState(state) {
         progress: requested ? { value: Math.min(1, received / requested), label: `${fmt(received)} / ${fmt(requested)} received` } : null,
       };
     }
+    case "SAVING":
+      return { ...base, active: true, title: "Saving the recording on this phone…", detail: "Sample count and checksum match the device." };
     case "ANALYSING":
       return { ...base, active: true, title: "Analysing on this phone…", detail: state.step ? `Now ${state.step}.` : null };
     case "COMPLETED":
@@ -103,7 +107,7 @@ export function describeRecordingState(state) {
           text: ERROR_TEXT[code] ?? "The recording failed.",
           reason: repeats(state.error?.message, ERROR_TEXT[code] ?? "") ? "" : state.error?.message ?? "",
         },
-        detail: "Nothing was saved from this attempt. Demo recordings are not used in its place.",
+        detail: "Nothing was saved from this attempt.",
         actions: { ...base.actions, retry: !state.error?.needsConnection, connect: Boolean(state.error?.needsConnection), dismiss: true },
       };
     }

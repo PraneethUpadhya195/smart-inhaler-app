@@ -60,7 +60,9 @@ const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
  */
 export function describeResearch(session) {
   const assessment = Array.isArray(session?.assessments) ? session.assessments[0] : null;
-  const hardware = session?.source === "ble" || assessment?.input?.input_domain === "prism_hardware";
+  // A Start Event session's analysis input is a reference recording, not the device's audio.
+  const referenceInput = session?.analysis_source?.type === "reference_recording";
+  const hardware = !referenceInput && (session?.source === "ble" || assessment?.input?.input_domain === "prism_hardware");
   const events = (assessment?.events ?? []).map((ev, i) => {
     const deviation = num(ev.aggregate_deviation);
     const p = num(ev.reference_tail_probability);

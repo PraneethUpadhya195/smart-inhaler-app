@@ -31,6 +31,14 @@
           "neverForLocation": true,
           "bluetoothAlwaysPermission": "PRISM connects to the PRISM inhaler device over Bluetooth to record inhaler sounds."
         }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": false,
+          "recordAudioAndroid": false,
+          "enableBackgroundPlayback": false
+        }
       ]
     ]
   }

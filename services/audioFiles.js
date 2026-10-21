@@ -42,6 +42,26 @@ export async function loadRecordingAudio(name) {
   return new Uint8Array(await file.arrayBuffer());
 }
 
+/**
+ * @param {string} name - capture.audio.file of a session
+ * @returns {string|null} the file's URI for playback, or null when the file is not on this phone
+ */
+export function recordingAudioUri(name) {
+  if (!name) return null;
+  const file = new File(new Directory(Paths.document, DIR_NAME), safeName(name));
+  return file.exists ? file.uri : null;
+}
+
+/**
+ * Remove a recording that no stored session refers to (the workflow could not store its session).
+ * @param {string} name - the name saveRecordingAudio returned
+ */
+export async function deleteRecordingAudio(name) {
+  if (!name) return;
+  const file = new File(new Directory(Paths.document, DIR_NAME), safeName(name));
+  if (file.exists) file.delete();
+}
+
 /** @returns {{ count: number, bytes: number }} recordings kept on this phone */
 export function localAudioSummary() {
   const dir = new Directory(Paths.document, DIR_NAME);

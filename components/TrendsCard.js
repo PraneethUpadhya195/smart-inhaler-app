@@ -3,8 +3,9 @@ import { View, Text, StyleSheet } from "react-native";
 import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
 
 /**
- * TrendsCard — recordings with the PRISM device and the inhalations detected in them, per day over
- * the last two weeks (utils/trendsView.js), from the stored sessions only. Counts, not scores.
+ * TrendsCard — Start Event sessions with the PRISM device and the inhalations detected in their
+ * analysis, per day over the last two weeks (utils/trendsView.js), from the stored sessions only.
+ * Counts, not scores.
  *
  * @param {{ trends: Object }} props - describeTrends() result
  */
@@ -33,7 +34,8 @@ export default function TrendsCard({ trends }) {
       </View>
       <Text style={styles.small}>
         All time: {totals.device} device recording{totals.device === 1 ? "" : "s"}, {totals.inhalations} inhalation
-        {totals.inhalations === 1 ? "" : "s"} detected, {totals.scoreable} measurable. Not counted: {totals.demo} demo,{" "}
+        {totals.inhalations === 1 ? "" : "s"} detected, {totals.scoreable} measurable. Not counted:{" "}
+        {totals.excluded ? `${totals.excluded} other device recording${totals.excluded === 1 ? "" : "s"}, ` : ""}{totals.demo} demo,{" "}
         {totals.simulated} simulated{totals.legacy ? `, ${totals.legacy} legacy` : ""}.
       </Text>
     </View>

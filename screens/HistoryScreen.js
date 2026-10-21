@@ -30,7 +30,7 @@ export default function HistoryScreen({ navigation }) {
       <View style={styles.centered}>
         <Text style={styles.emptyIcon}>💨</Text>
         <Text style={styles.emptyTitle}>No sessions yet</Text>
-        <Text style={styles.emptySubtitle}>Record with the PRISM device from the Dashboard ("Test On-Board Recording").</Text>
+        <Text style={styles.emptySubtitle}>Record with the PRISM device from the Dashboard ("Start Event").</Text>
       </View>
     );
   }

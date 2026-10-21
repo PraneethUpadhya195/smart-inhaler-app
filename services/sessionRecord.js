@@ -27,10 +27,12 @@ export const SESSION_SOURCES = Object.freeze(["simulation", "wav", "ble"]);
  * @param {Object} [meta.capture] - BLE recordings: device, transfer integrity and capture diagnostics
  * @param {Object[]|null} [meta.assessments] - Stage 9 outputs (prism-assessment-v1.0), one per recording
  * @param {Object} [meta.personal] - V3 personal-reference state (pipeline/PersonalReferenceStatus.js)
+ * @param {Object} [meta.analysisSource] - device sessions: which audio the analysis ran on
+ *   (services/analysisRecordings.analysisSourceBlock)
  * @returns {Object} plain JSON record. The optional blocks are added only when given, so records
  *   without them (all earlier sessions) keep exactly the previous shape.
  */
-export function buildSessionRecord(session, { source, simulated, deviceId = null, note = null, capture, assessments, personal }) {
+export function buildSessionRecord(session, { source, simulated, deviceId = null, note = null, capture, assessments, personal, analysisSource }) {
   if (!SESSION_SOURCES.includes(source)) throw new Error(`unknown session source ${source}`);
   if (typeof simulated !== "boolean") throw new Error("simulated must be true or false");
   const record = {
@@ -44,6 +46,7 @@ export function buildSessionRecord(session, { source, simulated, deviceId = null
     ...(capture !== undefined ? { capture } : {}),
     ...(assessments !== undefined ? { assessments } : {}),
     ...(personal !== undefined ? { personal } : {}),
+    ...(analysisSource !== undefined ? { analysis_source: analysisSource } : {}),
   };
   assertFirestoreSafe(record);
   return record;

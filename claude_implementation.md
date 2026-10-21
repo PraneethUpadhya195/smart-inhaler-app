@@ -1401,3 +1401,561 @@ All pass with 0 skipped. `gradlew :app:assembleDebug` (JDK 17) → BUILD SUCCESS
 - **V3 personalisation:** needs a new sitting definition and a validation study before anything personal is shown.
 - **Firmware:** the ESP32 runs the BLE recorder; the original serial sketch can be re-uploaded (see `firmware/README.md`).
 - **Not committed:** nothing is committed. `experiments/` and `PRISM_AUTONOMOUS_PROGRESS.md` stay untracked.
+
+# Entry 19 — 2026-10-21: Start Event split-source sessions (device capture for playback, reference recording for analysis), BLE firmware flashed
+
+## Objective
+The user's specification (`C:\Users\SJN\OneDrive\Desktop\prompt_app.md`, outside the repo) asks for this flow:
+- **Start Event:** a short press selects an inhalation reference recording (random, never the same one twice in a row) and a long press selects a no-inhalation reference recording.
+- **Capture:** the ESP32 then records 15 s for real. The capture is verified over BLE, saved and used for playback.
+- **Analysis:** the selected reference recording is run through the unchanged pipeline and Stage 9. History restores each session; Trends counts only these sessions.
+- **Firmware:** check BLE compatibility and flash with approval.
+
+**Decision recorded:** the spec asked for no on-screen indication that a reference recording supplied the analysis. That conflicts with CLAUDE.md §4 ("No mocked detector outputs presented as real… Simulation output must be clearly marked"). Claude declined to build it without a disclosure. The user approved the specification **with one plain caption**, "Analysis input: reference recording", on the session (results and History) screen. There is no other disclosure, banner or extra button.
+
+## What was inspected / changed
+**Inspected:** the app's recording workflow, BLE recorder and protocol, session record, storage, sync, views, screens and tests; firmware `firmware/prism_ble_recorder/` and `firmware/PROTOCOL.md`; `C:\CAPSTONE\hardware\prism_hardware.cpp` (read only).
+
+**Firmware compatibility (O, then V on hardware):**
+- `prism_hardware.cpp` is a USB-serial sketch (`R` → `AUDIO_BEGIN`, raw int32) with no BLE, so it is not compatible with the app.
+- `prism_ble_recorder` matches `services/ble/protocol.js` on every point: service and 5 characteristic UUIDs, properties, command bytes 0x01–0x06 and argument layouts, the 12-byte audio header, CRC-32 over int16 LE, STATUS JSON keys. 15 s = 120,000 samples is within 1,536–240,000.
+- **Backup:** full 4 MB flash read with esptool 5.3.1 at 115200 baud (230400 failed with "Packet content transfer stopped"). Saved to the session scratchpad: `esp32_backup/esp32_full_flash_before_reflash_20261021.bin`, SHA-256 `c9efdb4d9454a22611b1817e31ad12c8c0de23c0f40723e06e1a837d027086b0`. It contains the serial sketch (`AUDIO_BEGIN`, `PRISM_CFG` strings). **The scratchpad is temporary**, so copy it somewhere permanent to keep it.
+- **Flashed** `prism_ble_recorder` with the user's approval (`arduino-cli compile --upload -p COM7 --fqbn esp32:esp32:esp32:UploadSpeed=230400`; hash verified). Boot log: `prism-ble-recorder 1.0.0 ready as PRISM-4F42 (prism-esp32-582abdd44f42)`. The `build/` folder that arduino-cli exported into the sketch folder was moved out of the repo to the scratchpad.
+
+**App — new files:**
+- `services/analysisRecordings.js` (pure):
+  - the configured recordings: the 8 demo recordings as `ref-inhalation-01..08`, plus `ref-no-inhalation-01`;
+  - `pickAnalysisRecording` and `createAnalysisSelector`, which keep `@PRISM:analysisSelection` = `{ last_inhalation_id }` in phone storage;
+  - `analysisSourceBlock`, `usesReferenceInput`, `analysisRecordingOf` and `verifyAnalysisBytes` (SHA-256).
+- `services/analysisAudio.js` (app): loads the bundled analysis recordings (expo-asset) and their waveform.
+- `assets/analysis_recordings/no_inhalation_01.wav`: a byte-identical copy of `rec2018-01-23_11h00m33.928s.wav`, the recording of the research golden case `no_inhalation_detected`. Comes with `ATTRIBUTION.md` (same Kaggle dataset, CC BY-NC-ND 4.0).
+- `components/RecordingPlayback.js`: expo-audio player of `capture.audio.file` only. It says "Playback is not available…" when that file is not on the phone.
+- `services/test_split_source.js`: 195 checks, added to `npm test`.
+
+**App — changes:**
+- **`sessionRecord.buildSessionRecord`:** optional `analysisSource` → `analysis_source` (added only when given).
+- **`hardwareSession`:**
+  - new `analyseReferenceInput` builds a Start Event session: the same `capture` block, analysis of the selected recording (SHA-checked, `WavPcmSource` with `input_domain` `reference_dataset`, unchanged `pipeline.run` and `assessRecording`), `personal` null, `note` null;
+  - load, verify or pipeline failure → `PROCESSING_ERROR` with the capture kept; the capture is never analysed instead;
+  - `analyseHardwareRecording` (genuine path) is unchanged except that it now adds `analysis_source: { type: "device_capture" }`; `captureBlock` was extracted without change;
+  - `deviceHistory` (V3) ignores Start Event sessions.
+- **`recordingWorkflow`:**
+  - `run({ analysis })`: selection first (before any capture) → the unchanged capture and verification → new phase `SAVING` (the capture must be written, otherwise `STORAGE_FAILED` and no analysis) → `ANALYSING` → `COMPLETED`;
+  - if the session cannot be built or stored, `discardAudio` removes the saved capture;
+  - new codes `SELECTION_FAILED` and `STORAGE_FAILED`;
+  - the genuine path and its lifecycle are unchanged.
+- **`audioFiles`:** `recordingAudioUri` and `deleteRecordingAudio`.
+- **`sessionWaveform`:** a Start Event session draws its analysis recording (its events are on that timeline). Label null, so no file name is shown. "Not available" when that recording is missing; it never draws the capture instead.
+- **`AppContext`:**
+  - `startEvent({ long })`: ignored while a recording runs; short press → `SELECTION.INHALATION`, long press → `NO_INHALATION`;
+  - the selector uses AsyncStorage;
+  - default `recordingSeconds` 10 → 15 (stored settings keep their value).
+- **`RecordingPanel`:** "Test On-Board Recording" → "Start Event". Start Event, Try again and Record again all have `onPress` and `onLongPress` (600 ms); in RN Pressability a long press cancels the press.
+- **`DashboardScreen` / `HistoryScreen`:** wiring and the empty-state text.
+- **`SessionDetailScreen`:** the Recording card shows the waveform (no file label for Start Event sessions), the caption from `describeSession().analysisCaption`, and `RecordingPlayback` of `capture.audioFile`.
+- **`sessionView`:** `REFERENCE_INPUT_CAPTION`, `analysisCaption`; reads only the explicit `analysis_source.type`.
+- **`researchView`:** no hardware caveat when the analysis input is a reference recording.
+- **`recordingView`:** `SAVING` state (Transfer step), the two error texts; failure detail is now "Nothing was saved from this attempt." The sentence "Demo recordings are not used in its place" was removed because the spec forbids "Demo" in the normal flow.
+- **`trendsView` / `TrendsCard`:** count only `source "ble"` sessions whose `analysis_source.type` is `reference_recording`. Other device sessions go to `totals.excluded`, shown as "N other device recordings" under "Not counted". No inference from names, times or counts.
+- **`test_recording_view.js` (spec-driven updates):** the failure-text regex, and the Trends fixture marks its device sessions as reference sessions; added checks for exclusion, a single session and missing values.
+- **Dependency:** `expo-audio ~57.0.5` (`npx expo install`). The `app.json` plugin is set to `microphonePermission: false`, `recordAudioAndroid: false`, `enableBackgroundPlayback: false`. The APK requests no RECORD_AUDIO; expo-audio adds only `MODIFY_AUDIO_SETTINGS`.
+
+**Unchanged:** the ONNX model, DSP, features, windowing, grouping, thresholds, `InferencePipeline`, `ReferenceAssessment` (Stage 9), `assets/ml/**`, the V2 baseline and the Stage 9 reference, BLE protocol and recorder, `prism_hardware.cpp`.
+
+## Results (V = run; O = read in code; N = not verified)
+**Tests (V):** `PRISM_REQUIRE_DATASET=1 npm test` → exit 0.
+
+| Test file | Before | After |
+|---|---|---|
+| harness | all passed | all passed |
+| contract | 446 | 446 |
+| assessment (Stage 9) | 503 | 503 |
+| sessions | 150 | 150 |
+| ble | 102 | 102 |
+| split source (new) | — | 195 |
+| session view (UI scan) | 264 | 265 |
+| recording view | 67 | 71 |
+
+Before the update, 4 recording-view checks failed. All 4 were the intended spec changes (failure text, Trends filter); none was a regression.
+
+**Configured recordings (V, Node):**
+- all 9 have their SHA-256, are byte-identical to `../PRISM smart inhaler/data`, and are 8 kHz mono PCM16;
+- each inhalation recording gives `EVENTS_DETECTED` with a scoreable event;
+- the no-inhalation recording gives `NO_INHALATION_DETECTED`, 0 events, as its golden case.
+
+**Build (V):** `gradlew :app:assembleDebug` (JDK 17) → BUILD SUCCESSFUL in 2m 18s. The APK contains `res/raw/assets_analysis_recordings_no_inhalation_01.wav`, `expo/modules/audio/AudioModule` and both new UI strings.
+
+**Phone + ESP32 (V; OnePlus IV2201, Android 13; `adb install -r`, data kept):**
+- **Setup:**
+  - Bluetooth was off on the phone. The app showed its existing "Bluetooth is off" error (V), then Bluetooth was enabled with `cmd bluetooth_manager enable`.
+  - Settings → recording length set to 15 s (the phone had 10 stored).
+  - Scan found PRISM-4F42 at −36 dBm; connect read INFO (prism-ble-recorder 1.0.0, INMP441, 8000 Hz, protocol v1, 247-byte MTU).
+- **Short press (Start Event):** `ble_sess_1792560697701`.
+  - Capture: 120,000 samples, 15.0 s; CRC phone = device `50b1daf3`; 1,035 packets; 0 resend rounds; 0 DMA overflows; rate 7,988 Hz.
+  - The WAV pulled from the phone has that CRC and is not the analysis file.
+  - Analysis: `ref-inhalation-01`, 96,000 samples, 1 event 2.432–4.200 s SCORE_ONLY, Stage 9 WITHIN/STABLE.
+  - Phone = Node: events identical except `detector_confidence` |Δ| 3.0e-9; anomaly_score and Stage 9 deviation identical.
+  - Synced to Firestore.
+- **Result screen:** status, Source "PRISM device (BLE)", 12.00 s analysis waveform with the inhalation shaded, the caption, and "Device recording 0.00 s / 15.00 s".
+  - **Playback (V, system log):** expo-audio took audio focus at 11:03:30.69 and started an 8000 Hz AudioTrack; focus was released at 11:03:45.90 (15.2 s, the capture's length, not the analysis file's 12 s).
+- **Long press:** exactly one new session, `ble_sess_1792560903108`: `no_inhalation`, `NO_INHALATION_DETECTED`, capture CRC `e8659f17` verified. The short-press state stayed `ref-inhalation-01`, so the long press did not also trigger a short press.
+- **History / Trends:**
+  - 26 sessions listed;
+  - Trends "Device recordings (2)", "Inhalations detected (1)", "Not counted: 6 other device recordings, 11 demo, 7 simulated";
+  - the no-inhalation session reopens with its waveform, caption and its own playback.
+- **ESP32 reset 4 s into a recording** (RTS pulse on COM7): "Record failed — The connection to the PRISM device was lost… Nothing was saved from this attempt", Connect device. No session and no new WAV.
+- **App force-stopped and relaunched:** the remembered device auto-reconnected. A short press chose `ref-inhalation-07`; the stored previous choice was `ref-inhalation-04`.
+- **Capture file temporarily renamed:** the session screen shows the analysis waveform and "Playback is not available: the device recording is not on this phone."; no crash. The file was renamed back.
+- **Integrity:** the 22 pre-existing local sessions are byte-identical; 0 FATAL; no JS errors in logcat.
+
+**N:**
+- the physical sound of playback (the speaker was not listened to);
+- a human finger's long press (simulated with `input swipe` held 1.2 s);
+- a storage-full failure on the phone (Node only);
+- a transfer CRC failure on hardware (Node only);
+- Bluetooth permission denial on the phone.
+
+## Files changed
+- **New:**
+  - `services/{analysisRecordings,analysisAudio,test_split_source}.js`, `components/RecordingPlayback.js`;
+  - `assets/analysis_recordings/{no_inhalation_01.wav,ATTRIBUTION.md}`.
+- **Changed:**
+  - `app.json`, `package.json`, `package-lock.json`;
+  - `context/AppContext.js`, `components/{RecordingPanel,TrendsCard}.js`, `screens/{Dashboard,History,SessionDetail}Screen.js`;
+  - `services/{audioFiles,hardwareSession,recordingWorkflow,sessionRecord,sessionWaveform}.js`;
+  - `utils/{recordingView,researchView,sessionView,trendsView,test_recording_view}.js`;
+  - this log.
+- **Device state changed:**
+  - ESP32 firmware (backup above);
+  - phone Bluetooth turned on;
+  - app setting 15 s;
+  - 3 new sessions and 3 new WAVs on the phone, all 3 synced to Firestore (`ble_sess_1792560697701`, `…903108`, `…1053510`).
+
+## Tests (command and outcome)
+- Before: `PRISM_REQUIRE_DATASET=1 npm test` → exit 0 (see table).
+- After: `PRISM_REQUIRE_DATASET=1 npm test` → exit 0, 0 failed, 0 skipped.
+
+## Open issues / next step
+- **Disclosure scope:** the caption is the only indication on screen. Elsewhere, Start Event results look like device results:
+  - Dashboard "Last Session";
+  - History cards;
+  - the Trends counts, whose legend is still "Inhalations detected".
+- **CLAUDE.md §4:** these sessions show detector results that did not come from the captured audio. This contradicts the rule as written, which the project owner accepted with the caption; record it in the project's own documentation if the app is presented.
+- **Genuine analysis of the device audio is no longer reachable from the Dashboard,** because every start control is a Start Event. The code path (`startOnBoardRecording`, `analyseHardwareRecording`) is kept and tested.
+- **The labelled "Demo and test" buttons on the Dashboard are unchanged** (existing features; the spec did not ask for their removal explicitly).
+- **Session `recorded_at` is null for Start Event sessions,** because the analysis input has no recording time. History and Trends use the save time, and the capture time is in `capture.recorded_at` (shown under "Recording and transfer").
+- **Not committed.** Copy the flash backup out of the scratchpad if the serial firmware may be needed again.
+
+# Entry 20 — 2026-10-21: Local session history cleared on the phone (Firebase untouched)
+
+## Objective
+The user had already deleted the Firebase session history. This task clears the phone's local session history, with a backup first, so that PRISM starts from an empty history before personal-baseline scoring. Constraints:
+- no Firebase operation;
+- no change to source code, models, reference data, firmware, settings or the auth record;
+- no app wipe or reinstall;
+- selective removal only.
+
+(The read-only scoring and personal-baseline audit that came just before was not logged, because the user asked for no file changes in that task.)
+
+## What was inspected / changed
+**Storage, from the source:**
+- AsyncStorage (`@react-native-async-storage` 2.2.0, Android SQLite `databases/RKStorage`, table `catalystLocalStorage`):
+  - `@PRISM:session:<id>`: session records with their sync state (`services/localSessionStore.js`);
+  - `@PRISM:settings` (`context/AppContext.js`);
+  - `@PRISM:analysisSelection` (`services/analysisRecordings.js`);
+  - `@SmartInhaler:lastDevice` (`services/storageService.js`);
+  - the Firebase Auth persistence key (`firebase/firebaseConfig.js`, `getReactNativePersistence`).
+- Capture audio: `files/recordings/*.wav` (`services/audioFiles.js`).
+- Firestore: `getFirestore()`, an in-memory cache only, so no persistent Firestore cache exists on the device.
+- **There is no separate sync queue.** Pending state is `sync.state` inside each session entry (`services/syncService.js`).
+- **There is no persistent personal-baseline state.** V3 exists only as the `personal` snapshot inside session records.
+
+**Phone, app force-stopped:** `files/prism_conformance/` (conformance fixtures and results from Entries 4 and 6), `cache/` (expo-asset copies of the bundled WAVs, ONNX model and font; OkHttp `http-cache`), `shared_prefs/` (WebView, expo). None of these holds session history; all were left alone.
+
+**Backup:** `C:\CAPSTONE\backups\prism_local_sessions_2026-10-21\` (`README.md`), containing:
+- `session_records.json`: the 28 entries;
+- `recordings/`: the 12 WAVs, SHA-256 identical to the phone;
+- `referenced_wavs.json`;
+- `rollback_full_database/RKStorage`: a byte-identical copy, SHA-256 `56ec443c…`. **It contains the Firebase sign-in record; delete it once it is no longer needed.**
+
+**Cleared:**
+- **Database:** the 28 `@PRISM:session:*` keys were deleted with SQLite on the pulled copy, followed by `VACUUM` (integrity `ok`). The copy was written back with `adb exec-in run-as … cat > databases/RKStorage` while the app was stopped, after checking that the phone file still had SHA-256 `56ec443c…`. Result: `cd359815…`, same owner and mode, journal still empty.
+- **Audio:** the 12 `files/recordings/*.wav` files were removed by name. Each had been confirmed as referenced by one of the cleared sessions (`capture.audio.file`) and present in the backup.
+
+## Results (V = run)
+**Before:**
+- 32 keys: 28 sessions (5 simulation, 11 demo `wav`, 6 device-analysed `ble`, 6 Start Event); all 28 `synced`, 0 pending; 14 with Stage 9 `assessments`, 6 with a `personal` snapshot.
+- 12 WAVs, all referenced, none orphaned.
+
+**After:**
+- 4 keys (`@PRISM:settings` 15 s, `@PRISM:analysisSelection`, `@SmartInhaler:lastDevice`, auth), each byte-identical to before; 0 session keys; 0 WAVs.
+
+**App relaunched:**
+- Dashboard: "No sessions yet"; the device auto-reconnected; "All sessions on this phone are synced".
+- Personal baseline card: "Not available", without the earlier device-sitting line.
+- History: "No sessions yet", so Trends is not drawn.
+- Settings: 15 s, "0 recordings, 0.0 MB".
+- After the Firestore history fetch: still 0 session keys; 0 FATAL; no JS errors.
+
+**Unchanged:** `assets/` (git status), the ONNX model, Stage 9 reference and V2 baseline (SHA-256 prefixes `2e4e72d3`, `32ada36c`, `0eaea4b8`), `assets/analysis_recordings/`, `../PRISM smart inhaler/data` (2,167 files), the phone's conformance fixtures and asset cache, firmware, source code.
+
+**Correction within this task:** a phone listing truncated with `head -40` first suggested that one referenced WAV was missing. A full listing showed all 12 present. There was no anomaly.
+
+## Files changed
+This log only (repo). Outside the repo: the new backup folder. On the phone: `databases/RKStorage` (session keys removed) and `files/recordings/` (emptied).
+
+## Tests (command and outcome)
+`PRISM_REQUIRE_DATASET=1 npm test` → exit 0 (446 / 503 / 150 / 102 / 195 / 265 / 71 checks, 0 failed).
+
+## Open issues / next step
+- **Session-history copies remain in the session scratchpad** (temporary): earlier device snapshots `device/RK*.db`, `cap1.wav`, `cleanup/`. They also contain the sign-in record.
+- **`@PRISM:analysisSelection` was kept** (Start Event no-repeat state, not history). Remove it only if the selection sequence should restart.
+- **Restoring the local backup would not restore Firestore.**
+
+# Entry 21 — 2026-10-21: Product presentation — demo/simulation controls removed, user-facing wording polished
+
+## Objective
+User sections 18–20:
+- **Remove from the product UI:** the "Run Simulated Session" and "Analyse Demo Recording" controls, demo/development terminology, technical status details.
+- **Rule from the user (D/H):** keep internal provenance correct, and keep a concise source disclosure where it is needed to avoid a misleading claim.
+- **Unchanged:** Start Event, BLE, capture, playback, inference, V2, Stage 9 and personal-baseline logic.
+
+## What was inspected / changed
+**Located:** both controls in `screens/DashboardScreen.js`, in a "Demo and test (not device recordings)" section:
+- `handleSimulate` → `services/simulationService.runSimulatedSession`;
+- `handleDemo` → `services/demoRecordings.runDemoSession`.
+
+There are no other entry points: the navigation has 4 tabs + SessionDetail. `index.js` loads `tools/device_conformance/appRunner` only under `__DEV__`; it has no UI and is kept as developer tooling.
+
+**Removed from the UI (presentation only):**
+- **Dashboard:**
+  - the section label, both buttons, their hints, handlers, state (`isSimulating`, `isAnalysingDemo`, `busy`), the Alert, unused imports and styles;
+  - in the Personal Baseline card, the research blocker text and the "This device: N sittings…" line.
+- **SessionDetail:** the waveform's file-name label (`waveform.label`: capture or dataset file name).
+- **CaptureCard (title "Device recording"):** the Firmware and Sample-rate rows and the per-check list. It now shows one line, "Received complete and verified", plus any failed check. `utils/captureView.js` is unchanged; the stored record keeps all checks.
+- **DeviceScreen:** the Microphone, Sample rate, Link (protocol/MTU) and Resend buffer rows.
+- **Settings:** the "BLE Protocol", "Target Device" (ESP32 + INMP441) and "Analysis" (V2 contract + Stage 9) rows; "1.0.0-beta" (now 1.0.0, as `app.json`); "Built with Expo + Firebase"; the Firebase wording.
+
+**Reworded:**
+- **Results section:** "Research measurements" → "Acoustic assessment" (icon `analytics-outline`).
+- **Interpretation:** "a research reference dataset" → "the PRISM reference recordings" (`INTERPRETATION`).
+- **Personal Baseline:** one concise line, `PERSONAL_BASELINE_UNAVAILABLE_TEXT`, used on the Dashboard and in the results section.
+- **Source tags:** SIM/BLE/WAV → Simulated / Device / File.
+- **Source label:** `SOURCE_TEXT.ble` "PRISM device (BLE)" → "PRISM device".
+- **Sync message:** "offline, or Firebase not configured" → "offline or not signed in".
+- **Trends:** "Device recordings (N)" → "Sessions (N)"; footer "… N other sessions not included." in place of "demo/simulated" counts.
+- **Recording view:**
+  - COMPLETED "Recording analysed and saved" → **"Event saved"**: the old title was false for Start Event sessions, whose device recording is not analysed;
+  - the verified detail → "The recording arrived complete.";
+  - the Device-screen note no longer says the phone checks the recording "before analysing it" (now "before saving it").
+- **Settings:** "Raw audio on this phone" → "Recordings on this phone"; "Anonymous User ID"/ANON → "Account ID"/GUEST; a concise limitation note in About.
+
+**Kept:**
+- **Internal, unchanged:** `simulationService`, `demoSession`, `demoRecordings`, all assets, the analysis-source metadata.
+- **Retained disclosure:** the "Analysis input: reference recording" caption, needed for correct interpretation.
+
+**Not done (G):** no "Set up baseline" action. No personal-baseline implementation exists (audit, 2026-10-21), so the button would be a non-functional placeholder, which section 20 forbids. The card states the true status.
+
+## Results (V = run)
+**UI audit:** all 24 modules reachable from `App.js`, comments excluded, searched for demo, simulat, develop, fixture, dataset, debug, firebase, expo, BLE, WAV, INMP, ESP32, contract, rec2018, ref-inhalation, beta, research. Remaining matches:
+- **Internal only:** source codes `"ble"`, `"wav"`, `"simulation"` in logic; the `App.js` LogBox string; `PERSONAL_BLOCKER_TEXT.UPDATE_RULE_NOT_PORTED`, no longer rendered.
+- **Legacy-record disclosure:** the "Simulated" tag/label/banner and "WAV file"; the stored `note` banner (old demo notes contain a dataset file name, and the genuine-device note names ESP32 + INMP441). None of these sessions can be created from the UI now, and the local history is empty.
+- **Interpretation:** "reference upper limit" (the Stage 9 acoustic reference range); `HARDWARE_CAVEAT` (genuine device sessions only).
+
+**APK:** `gradlew :app:assembleDebug` (JDK 17) → BUILD SUCCESSFUL. The bundle contains "Acoustic assessment", "Personal baselines are not available", "Analysis input: reference recording" and "Start Event", and none of "Analyse Demo Recording", "Run Simulated Session", "Demo and test", "Research measurements", "Built with Expo".
+
+**Phone** (`adb install -r`, data kept; no Start Event pressed, to keep the cleared history empty):
+- the Dashboard ends with the Personal Baseline card; there is no demo section;
+- Device and Settings show the trimmed rows;
+- 0 session keys, 0 recordings, 0 FATAL, 0 JS errors.
+
+**Workflow files untouched by this task** (mtimes before it): `services/recordingWorkflow.js`, `hardwareSession.js`, `analysisRecordings.js`, `analysisAudio.js`, `context/AppContext.js`, `services/ble/*`.
+
+## Files changed
+- `screens/{Dashboard,SessionDetail,Device,Settings}Screen.js`;
+- `components/{CaptureCard,ResearchMeasurements,StatusTag,TrendsCard}.js`;
+- `utils/{researchView,sessionView,recordingView}.js`;
+- tests: `utils/test_recording_view.js` (verified-detail regex `/checksum/` → `/arrived complete/`), `services/test_split_source.js` (source label);
+- this log.
+
+## Tests (command and outcome)
+- Before (end of Entry 20): `PRISM_REQUIRE_DATASET=1 npm test` → exit 0.
+- After: exit 0 (446 / 503 / 150 / 102 / 195 / 265 / 71, 0 failed). One intermediate run failed on the pinned `/checksum/` regex before it was updated.
+
+## Open issues / next step
+- **The Personal Baseline "Set up" experience needs a baseline implementation and its specification first** (audit §10). Not started.
+- **Old note and source labels** would reappear only for legacy demo or simulated records (none exist).
+- **Not committed.**
+
+# Entry 22 — 2026-10-21: Start Event analyses the device recording; personal baseline implemented
+
+## Objective
+User's corrective task:
+- **Start Event:** make the actual ESP32 recording the analysis input (no reference WAV in the product flow), with truthful result wording.
+- **Personal baseline:** implement a persistent, functional one (versioned, setup/reset, eligibility, version recorded per comparison).
+- **Unchanged:** the model, 124-feature contract, DSP, Stage 9 and V2 formulas. Real-device detection must not be forced.
+
+## What was inspected / changed
+**Data flow before (Entries 19–21):**
+1. Start Event → `AppContext.startEvent({ long })` → `workflow.run({ analysis: SELECTION.* })`.
+2. `selectAnalysis` → `services/analysisRecordings.createAnalysisSelector` picked a bundled WAV.
+3. BLE capture → `PrismRecorder.record()` (CRC) → `keepAudio` (`services/audioFiles.saveRecordingAudio`, `files/recordings/*.wav`).
+4. `analyseReferenceInput` ran the pipeline on the **bundled WAV** (`WavPcmSource`, `reference_dataset`); the capture was only played back.
+
+**Data flow now:**
+1. Start Event → `startEvent()` = `startOnBoardRecording()` → `workflow.run({ nSamples })` (no selection).
+2. Capture and CRC verification.
+3. **SAVING** (required; `STORAGE_FAILED` otherwise, no analysis).
+4. `analyse(recording)` → `analyseHardwareRecording`: `BlePcmSource` (float32 = int16/32768, `prism_hardware`) → unchanged `InferencePipeline.run()` → Stage 9 `assessRecording` → V3 status → `comparePersonal`, against the baseline as stored before the session.
+5. Session stored; then `personalBaselineStore.observe(record)`.
+
+The analysed samples are the samples written to the WAV (the same `recording` object).
+
+**Reference path:** `run({ analysis })` and `analyseReferenceInput` are kept as an internal, tested path (`services/test_split_source.js`). The app context no longer wires it, and its sessions are labelled `analysis_source.type = "reference_recording"`.
+
+**Device-audio investigation (reused `experiments/audio_compatibility/scripts/app_windows.mjs` + `compare_app_python.py`):**
+- **Inputs:** the 12 BLE captures in the 2026-10-21 backup.
+- **Format:** all 8000 Hz mono, CRC = device, DC ≤ 6e-4, no clipping; RMS −55.5 to −22.9 dBFS, peaks up to −2.4 dBFS.
+- **Detector:** every window Noise; max P(Inhale) ≤ 0.009.
+- **App = Python:** identical labels, max |ΔP| ≤ 6e-8.
+- **No preprocessing mismatch found.** The blocker is the acoustic domain mismatch of Entries 12–17. Nothing was changed to force detections.
+- **The 3 earlier Start Event sessions that had "detected" an inhalation give `NO_INHALATION_DETECTED` on their own device audio**, which confirms their results were the reference recording's.
+
+**Personal baseline — new, pure: `pipeline/PersonalBaseline.js`**
+- **Formulas from V3** (`personal_reference.py`, checked):
+  - coordinates = the Stage 9 robust z (`feature_deviations`);
+  - B = per-feature `numpy.median` of the enrollment z (V3 `reenroll`), with ≥ `min_events_per_sitting` = 10 events;
+  - personal deviation = sqrt(mean (z − B)²) (V3 a_u).
+- **App policy (documented in the module):**
+  - enrollment = scoreable events of genuine device recordings made after "Set up baseline";
+  - READY at 10; then fixed (no V3 update or warm-up; trust radius not applied, rms(B) kept as `population_distance`);
+  - assess before adapt.
+- **Eligibility:**
+  - `source "ble"`, same `device_id`, `analysis_source "device_capture"`, `capture.integrity.verified`, assessment `input_domain "prism_hardware"`;
+  - SCOREABLE events with 4 finite z;
+  - idempotent per session and event.
+- **`validateBaseline`:** rejects other devices, non-finite z, duplicates, and a center that differs from the median of the enrollment.
+
+**Storage — `services/personalBaselineStore.js` (new):**
+- Key `@PRISM:personalBaseline:<device_id>` in AsyncStorage; JSON schema `prism-personal-baseline-v1`; local only, not synced.
+- **Actions:** `load` (missing → NOT_SET_UP, unreadable or invalid → UNAVAILABLE, never used), `setup` (version + 1, COLLECTING), `reset` (NOT_SET_UP, version kept), `observe`.
+- **Content:** id `pb-<device>-v<n>`, profile (device, user, domain), coordinates (Stage 9 reference id), enrollment z rows, center, `established_at`, an audit log of setup / ready / reset.
+- **Instance:** created in `services/appServices.js`.
+
+**Session record:** `personal_comparison` (schema `prism-personal-comparison-v1`), with `baseline_id` and `baseline_version`.
+- **Statuses:** NOT_SET_UP, NOT_ELIGIBLE, COLLECTING (`collected_before`, `contributes`, `required`), NO_SCOREABLE_EVENTS, COMPARED (per-event `personal_deviation` and `personal_feature_deviations`).
+- **Where it is built:** `sessionRecord.buildSessionRecord` (`personalComparison`) and `hardwareSession.analyseHardwareRecording` (`personalBaseline` option).
+
+**Workflow (`services/recordingWorkflow.js`):**
+- one post-capture path, `saveAndAnalyse` (SAVING → ANALYSING → stored);
+- `sessionExists` added: a saved file is removed only if no stored session refers to it (fixes the Entry 19 case where `save` could throw after storing).
+
+**AppContext:**
+- `startEvent` = device recording;
+- the baseline is loaded for the connected or last device;
+- `setupPersonalBaseline` and `resetPersonalBaseline`;
+- `analyse` passes the stored baseline; `save` stores, then observes (errors there never fail the session);
+- the selector and reference wiring are removed.
+
+**UI:**
+- **Start Event:** one gesture (the long press existed only to choose a reference WAV).
+- **Completion title** from the stored status:
+  - "Recording analysed and saved" (events);
+  - "Recording saved — no inhalation detected";
+  - "Recording saved — assessment unavailable" (INPUT_ERROR / PROCESSING_ERROR).
+- **Dashboard Personal Baseline card** (`utils/baselineView.js`):
+  - Setup required + **Set up baseline**;
+  - Setting up, with "k of 10 measured inhalations collected", a progress bar and Reset;
+  - Ready (version, date, n) + Reset;
+  - Unable to establish baseline + Set up;
+  - "Connect device" when no device is known.
+  - Reset asks for confirmation.
+- **Session screen:**
+  - new `components/PersonalComparisonCard.js` (`researchView.describePersonalComparison`): numbers only for COMPARED, otherwise the reason in words, plus the baseline version;
+  - "Measured" (scoreable) count replaces "Recordings" (also on Dashboard and History cards).
+- **Results section:** the old V3 "not available in this version" text is removed (`PERSONAL_BASELINE_UNAVAILABLE_TEXT` deleted).
+- **Trends:** counts device sessions analysed from their own recording; reference-input sessions are `excluded`. Personal values are not trended, because they depend on the baseline version.
+- **Device-session note:** shortened: "Recorded and analysed with your PRISM device. The inhalation detector was developed with recordings from a different microphone and has not yet been validated with this device."
+- **The "Analysis input: reference recording" caption** now appears only for reference-input sessions; none are produced by the app.
+
+**Unchanged:** the ONNX model, DSP/124 features, windows, grouping, scoreability, V2 scoring, Stage 9 code and reference, `assets/ml/**`, firmware, BLE protocol/recorder, playback.
+
+## Results (V = run; N = not verified)
+**Tests** (`PRISM_REQUIRE_DATASET=1 npm test` → exit 0):
+
+| Test file | Checks | Note |
+|---|---|---|
+| harness | all passed | |
+| contract | 446 | |
+| assessment | 503 | |
+| sessions | 150 | |
+| ble | 102 | |
+| split source | 195 | |
+| personal baseline + device workflow | 74 | new |
+| session view | 267 | UI scan covers the 2 new UI files |
+| recording view | 71 | |
+
+**Test changes:**
+- **Updated** (intended behaviour change):
+  - `test_ble` 5a: lifecycle includes SAVING; 5b: `keepAudio` returns a file name;
+  - `test_split_source` §5 (lifecycle), §6 (Trends now exclude reference-input sessions), §7 (Start Event = device input; no reference wiring in the app context);
+  - `test_recording_view` §4 (Trends fixture: device sessions counted, reference-input excluded).
+- **New `services/test_personal_baseline.js`:**
+  - **Input:** the device recording is the inference input and equals the saved file (CRC, run on the file = stored result, Stage 9 equal).
+  - **Failures:** corrupt transfer, wrong CRC and disconnect give no analysis and no session; an analysis failure keeps the recording; a stored session never loses its file.
+  - **Outcomes:** completion titles; V3 formulas.
+  - **Lifecycle:** setup → 10 measured inhalations → READY (B = median) → COMPARED with version 1 → fixed → restart → reset keeps sessions, files and assets → v2 → corrupt and tampered state rejected.
+  - **Eligibility:** reference-input sessions, unverified transfers, other devices, other domains, non-finite and unscoreable events are never enrolled.
+  - **Contracts:** model, baseline and reference unchanged; views.
+  - **Honesty note:** the READY path uses bundled inhalation audio streamed by the protocol simulator as its microphone signal. It checks the mechanism, not real-device detection. Each bundled recording gave 1 scoreable event through the BLE path (probe, V).
+
+**Android:** `gradlew :app:assembleDebug` (JDK 17) → BUILD SUCCESSFUL. The bundle contains "Set up baseline", "Personal comparison", "Recording analysed and saved", and both "Recording saved — …" titles (UTF-16 in the Hermes bundle).
+
+**Phone + ESP32** (OnePlus IV2201, PRISM-4F42, `adb install -r`, data kept):
+- **Setup:** the Dashboard showed "Setup required" with **Set up baseline**. Pressing it stored `@PRISM:personalBaseline:prism-esp32-582abdd44f42`: v1, COLLECTING, `prism_hardware`, coordinates `prism-assessment-ref-2026-10-06`.
+- **Start Event** (room sound, no inhalation performed) → "Recording saved — no inhalation detected". Session `ble_sess_1792570518113`:
+  - `analysis_source device_capture`;
+  - inference input `prism_ca7bf5b8` (= capture id), 120,000 samples, `prism_hardware`;
+  - CRC phone = device `f5776374`;
+  - `personal_comparison` COLLECTING (0 before, 0 added); baseline still 0 enrolled; synced.
+- **PC check of the pulled WAV:** CRC `f5776374`; app and Python both `NO_INHALATION_DETECTED`, labels identical, |ΔP| 6e-8; RMS −52.1 dBFS.
+- **Session screen:** the note, "No inhalation detected", the 15.00 s waveform of the device recording, playback of the same file, "Received complete and verified", Measured 0, Personal comparison "…added none · version 1", Acoustic assessment "0 measured inhalations". No reference caption.
+- **App restart:** the baseline was still "Setting up, 0 of 10".
+- **Reset:** confirmation → "Setup required"; the session and its WAV kept; the version counter (1) and log (setup, reset) kept.
+- **Errors:** 0 FATAL, 0 JS errors.
+
+**N:**
+- a READY baseline from real ESP32 inhalations (the detector finds none);
+- a personal comparison on the phone;
+- a human finger press on Set up / Reset (simulated taps).
+
+## Files changed
+- **New:**
+  - `pipeline/PersonalBaseline.js`;
+  - `services/personalBaselineStore.js`;
+  - `services/test_personal_baseline.js`;
+  - `utils/baselineView.js`;
+  - `components/PersonalComparisonCard.js`.
+- **Changed:**
+  - `context/AppContext.js`;
+  - `services/{appServices,hardwareSession,recordingWorkflow,sessionRecord}.js`;
+  - `components/{RecordingPanel,ResearchMeasurements,SessionCard,TrendsCard}.js`;
+  - `screens/{Dashboard,SessionDetail}Screen.js`;
+  - `utils/{recordingView,researchView,sessionView,trendsView}.js`;
+  - tests: `services/{test_ble,test_split_source}.js`, `utils/test_recording_view.js`;
+  - `package.json` (test script);
+  - this log.
+- **Device state:** 1 new test session plus its WAV (local and Firestore); baseline key for PRISM-4F42 at NOT_SET_UP (version counter 1, so the next setup is v2).
+
+## Tests (command and outcome)
+- Before: `PRISM_REQUIRE_DATASET=1 npm test` → exit 0 (end of Entry 21).
+- After: exit 0. Intermediate run: 16 failures, all from the intended changes above, then updated.
+
+## Open issues / next step
+- **Blocker (unchanged):** the detector classifies real INMP441 audio as Noise. Product sessions will mostly be "no inhalation detected", and the baseline cannot reach READY from real use until detection on PRISM hardware works. That needs hardware training data or a placement study, i.e. a model change outside this task.
+- **Scientific status:** the personal comparison is V3's formula under an app enrollment policy. It is NOT VALIDATED as personalization, has no cut-off, and is shown on the session screen on the owner's request. Research ARCHITECTURE §9.4 lists the personal channel as research-only. It does not describe how well an inhaler was used.
+- **Not committed.**
+
+# Entry 23 — 2026-10-21: Code restored to the Entry 19 state (Entries 21–22 code moved to a backup)
+
+## Objective
+The user asked for the exact application code state of Entry 19. That means the Start Event short and long press, the eight-plus-one reference selection, the split-source analysis and the Entry 19 results UI. Later personal-baseline code is not kept. Constraints:
+- recoverability first, then back up before changing anything;
+- no Git reset, commit or push;
+- no data deletion; no redesign;
+- rebuild and install the APK with app data kept.
+
+Entries 19–22 stay in this log unchanged. The code they describe for Entries 21–22 is now in the backup below, not in the working tree.
+
+## What was inspected / changed
+**Recoverability:**
+- Entries 19–22 were never committed (HEAD `2d9307a`, Entry 18), so Git alone cannot separate them.
+- Sources used:
+  - Claude Code's file history for this session (`~/.claude/file-history/d3ade011-…`, snapshots at each turn start);
+  - the session transcript, which holds every Edit/Write call and every Python edit script exactly as sent.
+- **Reconstruction (scratchpad `restore/`):**
+  - `git -c core.autocrlf=false archive HEAD` (LF, as the working files);
+  - then every Entry 19 file operation replayed in order: calls #30–#90, i.e. 22 Edit/Write calls and 10 Python scripts.
+  - `npx expo install expo-audio` (#30) needs the network. Its effect was taken from the record: `app.json` = the backup taken before Edit #32; `package.json` = HEAD + the `expo-audio ~57.0.5` line; `package-lock.json` unchanged since.
+  - The original shell collapsed `\\` to `\` in script #84 (it wrote a real line break that Edit #86 then fixed); the replay reproduces that.
+- **Independent checks of the reconstruction (V), all pass:**
+  - 13 files equal the file-history backups taken at the start of the turn after Entry 19 (snapshot #3, 06:50:19Z);
+  - `utils/test_recording_view.js` equals the backup taken just before Entry 21's first edit to it;
+  - 10 files changed in Entry 19 and never afterwards equal the working tree (including `package-lock.json` and the no-inhalation WAV).
+- **Untracked by file history:** `context/AppContext.js`, `screens/DashboardScreen.js`, `screens/SessionDetailScreen.js`, `components/RecordingPanel.js`, `utils/recordingView.js`, `utils/trendsView.js` and `package.json` were changed by scripts only; they come from the same validated replay.
+
+**Backup:** `C:\CAPSTONE\backups\code_state_before_entry19_restore_2026-10-21\` (README, `MANIFEST.sha256`, `files.json`), with `working_tree/` holding:
+- the 23 files as they were (copies);
+- the 5 Entry 22 files, moved: `pipeline/PersonalBaseline.js`, `services/personalBaselineStore.js`, `services/test_personal_baseline.js`, `utils/baselineView.js`, `components/PersonalComparisonCard.js`.
+
+`sha256sum -c MANIFEST.sha256` → all 28 OK, before and after the restore.
+
+**Restored (23 files, content = Entry 19):**
+- **Replay output (15):** `components/{RecordingPanel,TrendsCard}.js`, `context/AppContext.js`, `package.json` (test script back to Entry 19's), `screens/{Dashboard,SessionDetail}Screen.js`, `services/{hardwareSession,recordingWorkflow,sessionRecord,test_split_source}.js`, `utils/{recordingView,researchView,sessionView,test_recording_view,trendsView}.js`.
+- **Untouched by Entry 19, so restored to HEAD (8):** `components/{CaptureCard,ResearchMeasurements,SessionCard,StatusTag}.js`, `screens/{Device,Settings}Screen.js`, `services/{appServices,test_ble}.js`.
+- No `git checkout` or `git reset`; files were written from the reconstruction.
+
+**Not touched:** 93 files that differ from the LF export only in line endings (never edited; including all of `assets/ml/`), this log, `android/` (unchanged since Entry 19), assets, data, Firebase, firmware.
+
+## Results (V = run; N = not verified)
+- **Restored files:** all 23 byte-identical to the reconstruction; the 5 moved files absent from the repo and present in the backup.
+- **Whole repository vs reconstruction** (tracked + code files): 0 content differences, 0 extra files, 0 missing files (line-ending-only differences: 93, untouched).
+- **Remaining line-ending uncertainty (content identical):** for the 8 files restored to HEAD, the working copies at Entry 19 were:
+  - LF for 5 (per earlier-session backups);
+  - probably CRLF for `components/SessionCard.js` and `components/StatusTag.js` (last recorded state 2026-10-09: CRLF, same content; Entries 21–22 normalised them to LF);
+  - unknown for `screens/SettingsScreen.js` (no backup anywhere).
+
+  They are now LF. Git treats both as identical (autocrlf), and tests and the bundle are unaffected.
+- **Tests:** `PRISM_REQUIRE_DATASET=1 npm test` → exit 0. harness all passed; contract 446, assessment 503, sessions 150, ble 102, split source 195, session view 265, recording view 71; 0 failed, 0 skipped. These are exactly Entry 19's recorded counts.
+- **APK:** `gradlew :app:assembleDebug` (JDK 17) → BUILD SUCCESSFUL. The bundle contains "Run Simulated Session", "Analyse Demo Recording", "Demo and test", "Research measurements", "Recording analysed and saved", "Analysis input: reference recording" and "Start Event", and none of "Set up baseline", "Personal comparison" or "Acoustic assessment".
+- **Install:** `adb install -r` → Success as an update (`firstInstallTime` 2026-10-09 unchanged, `lastUpdateTime` 2026-10-21 14:20:42; no uninstall, same debug signature).
+  - App storage before and after: 6 keys, 1 session, identical digest of all keys and values; the session's WAV is present.
+- **Launch:** connected to PRISM-4F42. The Dashboard shows Start Event, Last Session (tag "BLE"), Personal baseline "Not available" with the research text, and the "Demo and test" section with both buttons. 0 FATAL, 0 JS errors.
+- **N:** no Start Event, long press or demo action was run on the phone (each would add a session); the behaviour is covered by the tests above.
+
+## Files changed
+- **Repository:** the 23 files above restored; 5 files moved to the backup; this log.
+- **Outside:** the backup folder.
+- **Phone:** the APK updated (data kept).
+
+## Tests (command and outcome)
+- Before (end of Entry 22): `PRISM_REQUIRE_DATASET=1 npm test` → exit 0 (including test_personal_baseline 74).
+- After: exit 0 with Entry 19's counts (above).
+
+## Open issues / remaining differences from Entry 19
+- **Data (kept, as instructed):** the Entry 22 test session `ble_sess_1792570518113` (device-analysed, NO_INHALATION_DETECTED, also in Firestore) and the key `@PRISM:personalBaseline:prism-esp32-582abdd44f42`.
+  - The Entry 19 code does not read the baseline key.
+  - The session appears in History and as Last Session. Its V3 `personal` block makes the Dashboard show "This device: 1 sitting(s) recorded, 0 of 10 would qualify".
+  - Trends count it under "other device recordings" (Entry 19 rule: only reference-input sessions are counted).
+- **Line endings** of `SessionCard.js`, `StatusTag.js` and `SettingsScreen.js` (above).
+- **This log** keeps Entries 20–22 (append-only). Their code descriptions refer to the backup.
+- **Not committed.**
+
+# Entry 24 — 2026-10-21: Follow-up to Entry 23: line endings of two restored files; installed APK
+
+## Objective
+Settle the line-ending uncertainty that Entry 23 reported for three restored files. Entry 23 stays as written.
+
+## What was inspected / changed
+**Evidence for the Entry 19 working-copy line endings:**
+- **`components/SessionCard.js`, `components/StatusTag.js` — CRLF:**
+  - Git's index recorded a working-file size equal to the CRLF size (2885 / 2220 bytes) with mtime 1791578375 (2026-10-09), i.e. the last time Git saw them clean, before Entries 21–22 rewrote them;
+  - the latest earlier-session file-history backups (session 65bf0247, 2026-10-09) are CRLF with the same content.
+- **`screens/SettingsScreen.js` — LF:** its last write before this session (session 65bf0247, 2026-10-16) used `open(p, 'w', newline='\n')`, and nothing wrote it again before Entry 21.
+
+**Change:** the two files were converted back to CRLF. Content is unchanged and both now equal the earlier-session backups byte for byte. `git status` no longer lists them; it did while they were LF.
+
+## Results (V = run)
+- `PRISM_REQUIRE_DATASET=1 npm test` → exit 0 with Entry 19's counts (harness, 446, 503, 150, 102, 195, 265, 71).
+- **`gradlew :app:assembleDebug` → BUILD SUCCESSFUL, but the JS bundle hash changed:** `95fdf8f7…` (APK installed in Entry 23, built while the two files were LF) → `7f88cee5…` (current tree).
+  - The JavaScript is the same code (only line endings differ), but the bundle bytes differ, so the APK on the phone is not a byte-exact build of the restored tree.
+  - It was not reinstalled.
+
+## Files changed
+`components/SessionCard.js`, `components/StatusTag.js` (line endings only), this log.
+
+## Tests (command and outcome)
+`PRISM_REQUIRE_DATASET=1 npm test` → exit 0.
+
+## Open issues / next step
+- **To make the phone byte-exact:** reinstall the current build with `adb install -r` (data kept). This needs the user's go-ahead.

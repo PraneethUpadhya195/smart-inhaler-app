@@ -10,7 +10,8 @@
  *    ("acoustically within / outside the range of the reference recordings"), the PRISM-hardware caveat
  *    before any number, no NORMAL/ANOMALY, GOOD/POOR, quality, percentage, clinical or health wording,
  *    personal baseline shown only as unavailable with reasons.
- * 4. Trends: counts per day from stored sessions; demo, simulated and legacy sessions kept apart.
+ * 4. Trends: counts per day from Start Event sessions only (explicit analysis_source); device sessions
+ *    analysed from their own audio, demo, simulated and legacy sessions kept apart.
  *
  * Run: node utils/test_recording_view.js   (part of npm test)
  */
@@ -78,7 +79,7 @@ for (const code of Object.values(RECORDER_ERROR)) check(typeof ERROR_TEXT[code] 
 const lost = describeRecordingState({ phase: "ERROR", failedPhase: "RECORDING",
   error: { code: "DISCONNECTED", message: "The device disconnected.", needsConnection: true } });
 check(lost.error.text === ERROR_TEXT.DISCONNECTED && lost.actions.connect && !lost.actions.retry && lost.step === 1
-  && /Record failed/.test(lost.title) && /Demo recordings are not used/.test(lost.detail), "disconnect: Connect device, failed at Record");
+  && /Record failed/.test(lost.title) && /Nothing was saved/.test(lost.detail), "disconnect: Connect device, failed at Record");
 const crc = describeRecordingState({ phase: "ERROR", failedPhase: "TRANSFERRING",
   error: { code: "CRC_MISMATCH", message: "checksum", needsConnection: false } });
 check(crc.actions.retry && !crc.actions.connect && crc.step === 2, "checksum failure: Try again, failed at Transfer");
@@ -169,11 +170,12 @@ check(Object.values(RANGE_TEXT).every((t) => !/\b(normal|abnormal|anomal)/i.test
 console.log("4. Trends");
 const now = new Date(2026, 9, 16, 12, 0, 0);
 const day = (offset, hour = 10) => new Date(2026, 9, 16 - offset, hour).toISOString();
+const ref = { analysis_source: { type: "reference_recording" } };
 const sessions = [
-  { source: "ble", recorded_at: day(0), n_events: 2, n_scored: 1 },
-  { source: "ble", recorded_at: day(0, 11), n_events: 0, n_scored: 0 },
-  { source: "ble", recorded_at: day(3), n_events: 1, n_scored: 1 },
-  { source: "ble", recorded_at: day(30), n_events: 5, n_scored: 5 },
+  { source: "ble", ...ref, recorded_at: day(0), n_events: 2, n_scored: 1 },
+  { source: "ble", ...ref, recorded_at: day(0, 11), n_events: 0, n_scored: 0 },
+  { source: "ble", ...ref, recorded_at: day(3), n_events: 1, n_scored: 1 },
+  { source: "ble", ...ref, recorded_at: day(30), n_events: 5, n_scored: 5 },
   { source: "wav", simulated: false, timestamp: new Date(2026, 9, 16, 9) },
   { source: "simulation", simulated: true, timestamp: new Date(2026, 9, 15, 9) },
   { legacy: true, timestamp: new Date(2026, 9, 16, 9) },
@@ -183,7 +185,21 @@ check(t.days.length === 14 && t.days[13].key === "2026-10-16" && t.days[0].key =
 check(t.days[13].device === 2 && t.days[13].inhalations === 2 && t.days[13].other === 1, "today: 2 device recordings, 2 inhalations, 1 other");
 check(t.days[10].device === 1 && t.days[10].inhalations === 1, "3 days ago");
 check(t.totals.device === 4 && t.totals.inhalations === 8 && t.totals.scoreable === 7 && t.totals.demo === 1
-  && t.totals.simulated === 1 && t.totals.legacy === 1, `totals ${JSON.stringify(t.totals)}`);
+  && t.totals.simulated === 1 && t.totals.legacy === 1 && t.totals.excluded === 0, `totals ${JSON.stringify(t.totals)}`);
+// Device sessions analysed from their own audio: explicit device_capture, and earlier sessions without
+// analysis_source (never reinterpreted). They are not counted, whatever their events or file names.
+const genuine = [
+  { source: "ble", analysis_source: { type: "device_capture" }, recorded_at: day(0, 9), n_events: 3, n_scored: 3 },
+  { source: "ble", recorded_at: day(0, 8), n_events: 1, n_scored: 1, capture: { audio: { file: "ref-inhalation-01.wav" } } },
+];
+const tg = describeTrends([...sessions, ...genuine], { now });
+check(tg.totals.device === 4 && tg.totals.inhalations === 8 && tg.totals.scoreable === 7 && tg.totals.excluded === 2
+  && tg.days[13].device === 2 && tg.days[13].inhalations === 2, "genuine device sessions are excluded from the trends");
+check(describeTrends(genuine, { now }).totals.device === 0, "only genuine sessions: nothing counted");
+const single = describeTrends([sessions[0]], { now });
+check(single.totals.device === 1 && single.days[13].inhalations === 2 && single.maxCount === 2, "a single session");
+check(describeTrends([{ source: "ble", ...ref, n_events: null, n_scored: undefined }, null], { now }).totals.inhalations === 0,
+  "missing values and a missing session do not count or throw");
 check(t.maxCount === 3, "scale from the largest daily count");
 check(describeTrends([], { now }).totals.device === 0, "empty history");
 checkWording(t, "trends");

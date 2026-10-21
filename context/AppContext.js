@@ -6,15 +6,17 @@ import { localSessionStore, sessionSync } from "../services/appServices";
 import { mergeSessionLists, withTimeout } from "../services/syncService";
 import { getRecorder } from "../services/bleService";
 import { createRecordingWorkflow, LIFECYCLE } from "../services/recordingWorkflow";
-import { analyseHardwareRecording, deviceHistory } from "../services/hardwareSession";
-import { saveRecordingAudio } from "../services/audioFiles";
+import { analyseHardwareRecording, analyseReferenceInput, deviceHistory } from "../services/hardwareSession";
+import { saveRecordingAudio, deleteRecordingAudio } from "../services/audioFiles";
+import { createAnalysisSelector, SELECTION } from "../services/analysisRecordings";
+import { loadAnalysisBytes } from "../services/analysisAudio";
 import { getPipeline } from "../services/inferenceService";
 import { saveDevice } from "../services/deviceService";
 import { saveLastDevice } from "../services/storageService";
 
 const SETTINGS_KEY = "@PRISM:settings";
 /** App settings kept on this phone. recordingSeconds: length of an on-board recording. */
-export const DEFAULT_SETTINGS = Object.freeze({ recordingSeconds: 10, vibrateOnResult: true });
+export const DEFAULT_SETTINGS = Object.freeze({ recordingSeconds: 15, vibrateOnResult: true });
 export const RECORDING_SECONDS_CHOICES = Object.freeze([5, 10, 15]);
 
 /** How long a background fetch of the Firestore history may take before it is ignored. */
@@ -241,13 +243,19 @@ export function AppProvider({ children }) {
   // ─── On-board recording ──────────────────────────────────────────────────────
 
   if (!workflowRef.current) {
+    const selector = createAnalysisSelector({ storage: AsyncStorage });
     workflowRef.current = createRecordingWorkflow({
       recorder: getRecorder(),
       keepAudio: saveRecordingAudio,
-      analyse: (recording, { audioFile }) => analyseHardwareRecording(getPipeline, recording, {
-        audioFile,
-        history: deviceHistory(sessionsRef.current, recording.device?.deviceId ?? null),
-      }),
+      selectAnalysis: (selection) => selector.select(selection),
+      discardAudio: deleteRecordingAudio,
+      // Start Event sessions analyse the chosen reference recording; the capture is only kept and played.
+      analyse: (recording, { audioFile, analysisRecording }) => (analysisRecording
+        ? analyseReferenceInput(getPipeline, recording, { analysisRecording, loadAnalysisBytes, audioFile })
+        : analyseHardwareRecording(getPipeline, recording, {
+          audioFile,
+          history: deviceHistory(sessionsRef.current, recording.device?.deviceId ?? null),
+        })),
       save: (record) => addNewSessionRef.current(record),
       onState: (state) => {
         setRecordingState(state);
@@ -262,6 +270,18 @@ export function AppProvider({ children }) {
     if (workflow.isRunning()) return Promise.resolve(null);
     const seconds = settingsRef.current.recordingSeconds;
     return workflow.run({ nSamples: Math.round(seconds * 8000) });
+  }, []);
+
+  /**
+   * Start Event: a press (long: false) or a long press (long: true) on a start control. Chooses the
+   * analysis recording, then records with the device as above. Never throws; a second call while a
+   * recording runs is ignored.
+   */
+  const startEvent = useCallback(({ long = false } = {}) => {
+    const workflow = workflowRef.current;
+    if (workflow.isRunning()) return Promise.resolve(null);
+    const seconds = settingsRef.current.recordingSeconds;
+    return workflow.run({ nSamples: Math.round(seconds * 8000), analysis: long ? SELECTION.NO_INHALATION : SELECTION.INHALATION });
   }, []);
 
   const dismissRecording = useCallback(() => workflowRef.current.reset(), []);
@@ -293,6 +313,7 @@ export function AppProvider({ children }) {
         disconnectDevice,
         recordingState,
         startOnBoardRecording,
+        startEvent,
         dismissRecording,
         settings,
         updateSettings,
