@@ -1959,3 +1959,177 @@ Settle the line-ending uncertainty that Entry 23 reported for three restored fil
 
 ## Open issues / next step
 - **To make the phone byte-exact:** reinstall the current build with `adb install -r` (data kept). This needs the user's go-ahead.
+
+# Entry 25 — 2026-10-21: Demo Baseline (reference-derived demonstration of baseline initialization and adaptation)
+
+## Objective
+Add one isolated feature on top of the restored Entry 19 workflow (commit `a89cdee`): a **Demo Baseline**, built from the eligible reference inhalations analysed in Start Event sessions.
+- **What it demonstrates:** initialization, the distance from the baseline before an update, and an exponential update with η = 0.3.
+- **What stays unchanged:** everything else — Start Event selection, BLE, the analysis pipeline, Stage 9, session records, firmware.
+
+It is not a personal baseline and does not touch the V3 status or the Entry 22 artifacts.
+
+## What was inspected / changed
+**Recording audit (V; script in the session scratchpad, `demo_baseline/audit.py`; read only):**
+- **Dataset** (`../PRISM smart inhaler/data`): 361 WAVs, 361 distinct SHA-256 (no byte duplicates).
+  - `annotation.csv`: 301 annotated recordings, 255 with an Inhale annotation, 60 unannotated.
+  - Research deployment run (`results/final_assessment/e2e_deployment_recordings.csv`): 322 EVENTS_DETECTED, 39 NO_INHALATION_DETECTED.
+  - 252 recordings have an Inhale annotation and exactly one usable detected inhale event (`results/inhale_dataset/inhale_events_v1.csv`).
+- **The app bundles 9 recordings** (only `services/demoRecordings.js` and `services/analysisAudio.js` require WAVs):
+  - **8 inhalation references** (`ref-inhalation-01..08`):
+    - each byte-identical to its dataset file;
+    - an Inhale annotation;
+    - exactly one usable event;
+    - research `n_scoreable` = 1;
+    - detected event vs annotated Inhale IoU 0.85–0.95.
+
+    Eligible.
+  - **No-inhalation reference:** annotated Drug ×4 only, NO_INHALATION_DETECTED. Excluded.
+  - The two synthetic golden WAVs under `assets/ml/` are not required by app code.
+- **The other 352 dataset recordings are not packaged and are not accessible to the app.** No asset loading was added.
+
+**Existing baseline artifacts kept separate:**
+- `pipeline/PersonalReferenceStatus.js` and the session `personal` field (V3 status);
+- the Entry 22 key `@PRISM:personalBaseline:<device>` (still on the phone, unread).
+
+The demo uses its own key `@PRISM:demoBaseline`, schema `prism-demo-baseline-v1`.
+
+**New `services/demoBaseline.js` (pure):**
+- **Eligibility (`demoBaselineInput`)** — explicit session metadata only:
+  - `source "ble"`, `analysis_source.type "reference_recording"`, `selection "inhalation"`;
+  - the reference must be one of the 8 (registry id and SHA-256);
+  - verified capture; `session_status` SCORE_ONLY;
+  - the analysis input = the selected reference (`reference_dataset`);
+  - a Stage 9 assessment against the bundled reference;
+  - exactly one SCOREABLE event with four finite numeric `feature_values`.
+- **Coordinates:** z = (x − center) / scale using the Stage 9 reference parameters (`loadAssessmentReference`), required to equal the assessment's own `feature_deviations` exactly.
+- **Algorithm (`applyDemoBaseline`, `prism-demo-baseline-ema-v1`):**
+  - first session: B = z, distance null;
+  - later sessions: D = rms(z − B_before) (`contract.rmsZ`), then B = B_before + 0.3·(z − B_before).
+  - Each contribution records action, reference, z, `baseline_before`, `baseline_after`, deviation and time.
+  - No threshold.
+- **State:** initialized, baseline, `sessions_processed`, `unique_reference_ids`, `last_session_id`, `last_reference_id`, `last_deviation`, `updated_at`, algorithm, η, coordinates, and contributions keyed by `session_id` (idempotency).
+- **Store (`createDemoBaselineStore`):**
+  - `load()` validates; an unreadable entry is reported and never used;
+  - `observe(record)` never throws: already processed → `already_processed`; ineligible → `skipped` with a reason; a storage failure → `skipped` + error, nothing recorded;
+  - `reset()` writes an empty state to its own key only.
+
+**`context/AppContext.js` (additions only, plus the `save` line it wraps):**
+- the store instance (AsyncStorage);
+- the Start Event workflow's `save` step now stores the session as before, then calls `observe(record)` inside try/catch (it cannot affect the workflow or the stored session);
+- the demo baseline is loaded at start-up; `resetDemoBaseline`; context fields `demoBaseline` and `resetDemoBaseline`.
+
+**Screens:**
+- **`utils/researchView.js` (additions only):** `DEMO_BASELINE_EXPLANATION`, `describeDemoBaseline(demo, session)` (read-only).
+- **New `components/DemoBaselineCard.js`:**
+  - section "Demo Baseline" with the explanation;
+  - state, eligible sessions processed, unique reference recordings, most recent reference, most recent distance (before update);
+  - what this session did: initialized / updated with its distance / skipped with the reason / not processed (recorded before the baseline started or before its last reset);
+  - "Reset demo baseline" with a confirmation stating its scope.
+- **`screens/SessionDetailScreen.js`:** shows the card after the research section for device (`source "ble"`) sessions; no other change.
+
+**Wording:**
+- **"distance" instead of "deviation"** on screen: the project UI scan (`utils/test_session_view.js`) forbids "deviation" outside the research view files. Data fields keep `deviation`.
+- **The explanation omits "technique":** forbidden by the same scan. It reads "it is not a personalized baseline or a clinically validated score."
+- **Not changed:** existing tests.
+
+**`package.json`:** `services/test_demo_baseline.js` added to `npm test`.
+
+## Results (V = run; O = read in code; N = not verified)
+- **Tests:** `PRISM_REQUIRE_DATASET=1 npm test` → exit 0. harness all passed; contract 446, assessment 503, sessions 150, ble 102, split source 195, **demo baseline 71 (new)**, session view 266 (the UI scan now also covers the card), recording view 71. 0 failed.
+- **New test coverage** (real Start Event sessions through the protocol simulator, the Entry 19 workflow and the existing reference analysis):
+  - **Items 1–4:** initialization, no distance on the first session, D against B_before (and not B_after), exact update.
+  - **Items 5–7:** no-inhalation reference, failed analysis, and 12 other ineligible variants (statuses, device / demo-button / simulated / legacy sessions, wrong reference or SHA, unverified capture, mismatched input, no assessment); NaN, Infinity, missing and string measurements, Stage 9 mismatch, two scoreable events, malformed stored state.
+  - **Items 8–9:** the same session and history items re-observed → `already_processed`; re-rendering writes nothing; static checks: screens, card and history do not call `observe`; the app calls it only after storing a session.
+  - **Item 10:** reference A, B, A → 3 sessions, 2 unique references.
+  - **Items 11–12:** restart reload with idempotency; reset changes only its key (sessions, settings and selection state unchanged).
+  - **Item 13:** a write failure or an unreadable entry does not affect the session; Stage 9 identical.
+  - **Item 14:** Stage 9 output = a direct assessment of the same input; no demo field in session records; the stored session equals the analysed record.
+  - **Item 15:** 8 references, no consecutive repeat, long press → no-inhalation; Start Event wiring and long-press handlers unchanged.
+- **Unchanged since `a89cdee`** (`git diff --stat` empty): `pipeline/`, `services/ble/`, `services/{recordingWorkflow,hardwareSession,analysisRecordings,analysisAudio,sessionRecord}.js`, `components/{RecordingPanel,ResearchMeasurements}.js`, `screens/DashboardScreen.js`, `assets/`, `app.json`, `package-lock.json`, `firmware/`, `android/`.
+- **Android:** `gradlew :app:assembleDebug` → BUILD SUCCESSFUL (compile check; the bundle contains the new strings). **Not installed** (the task excludes installs). The phone still runs the Entry 23 build.
+- **N:** the card on a phone; a demo-baseline update from a real Start Event on the phone.
+
+## Files changed
+- **New:** `services/demoBaseline.js`, `services/test_demo_baseline.js`, `components/DemoBaselineCard.js`.
+- **Changed:** `context/AppContext.js`, `screens/SessionDetailScreen.js`, `utils/researchView.js` (additions only), `package.json` (test script), this log.
+
+## Tests (command and outcome)
+- Before: `PRISM_REQUIRE_DATASET=1 npm test` → exit 0 (Entry 24 state, Entry 19 counts).
+- After: exit 0 (above). One intermediate failure was in the new test's own fixture (the selection key was never written by its fixed-pick rig); the test was corrected to seed the key.
+
+## Open issues / next step
+- **Pool:** only the 8 bundled inhalation references feed the demo; at most 8 unique references. The 252 annotation-backed dataset recordings are not packaged.
+- **Coverage:** sessions from the Dashboard's "Analyse Demo Recording" do not feed the demo baseline (only Start Event sessions do).
+- **Display rules:** research ARCHITECTURE §9.4 keeps personal/continuous deviations off user screens. This demo shows one, labelled as a demonstration, at the owner's request. It describes distance in a normalised acoustic feature space, nothing about how an inhaler was used.
+- **Not committed** (the task excludes commits). Device test pending.
+
+# Entry 26 — 2026-10-21: Demo Baseline: review, in-place install, on-device verification, commit
+
+## Objective
+Review the Entry 25 Demo Baseline, install a fresh build on the phone without losing app data, verify it and the Entry 19 workflow on the device, then commit only the Demo Baseline files. No new feature, no algorithm change, no change outside the Entry 25 files.
+
+## What was inspected / changed
+**Review:**
+- Branch `ml-integration`, HEAD `a89cdee`.
+- The diff against HEAD contains only the Entry 25 files: `services/demoBaseline.js`, `components/DemoBaselineCard.js`, `services/test_demo_baseline.js` (new); `context/AppContext.js`, `screens/SessionDetailScreen.js`, `utils/researchView.js`, `package.json`, this log.
+  - The 4 removed lines are lines extended or wrapped in place (the `save` closure, the test script, one import, one destructuring).
+  - The log is append-only (HEAD content is a prefix).
+- Protected areas unchanged against HEAD (`git diff --stat` empty): `pipeline/`, `services/ble/`, `services/{recordingWorkflow,hardwareSession,analysisRecordings,analysisAudio,sessionRecord}.js`, `components/{RecordingPanel,ResearchMeasurements}.js`, `screens/DashboardScreen.js`, `firmware/`, `assets/`, `app.json`, `package-lock.json`.
+- The implementation matches the specification. No defect found; no code changed in this entry.
+- **Noted, not changed:** if a session were stored within milliseconds of app start, the start-up load could overwrite that update. A Start Event takes over 15 s.
+
+**Install safety:**
+- **Phone:** OnePlus IV2201 (`BQBERCSW9TG6HQ8D`), authorized.
+- **Installed app:** `com.anonymous.smart_inhaler_app`, versionCode 1, DEBUGGABLE; first installed 2026-10-09.
+- **Build:** same application id and versionCode (`aapt dump badging`).
+- **Signing:** `apksigner verify --print-certs` on the installed `base.apk` (pulled) and on the new APK — the same certificate (CN=Android Debug, SHA-256 `fac61745dc09…3b9c`).
+- **So `adb install -r` is an in-place update that keeps the app's data.**
+- **App-data backup before installing:** via `run-as` (debuggable app) to `C:\CAPSTONE\backups\phone_app_data_before_demo_baseline_install_2026-10-21\`.
+  - Contents: `databases/` (AsyncStorage, which includes the Firebase sign-in record), `shared_prefs/`, `files/recordings/`, `files/prism_conformance/`.
+  - 18 files; `sha256sum -c MANIFEST.phone.sha256` OK.
+  - Restore path: `adb exec-in run-as … cat > …`, as used in Entry 20.
+  - App storage at that point: 8 keys, 3 sessions (one device session from Entry 22, plus a long-press and a short-press session the user had made on the Entry 23 build).
+
+## Results (V = run; N = not verified)
+**Build and install (V):**
+- `gradlew :app:assembleDebug` → BUILD SUCCESSFUL, up to date. APK `android/app/build/outputs/apk/debug/app-debug.apk`, SHA-256 `356f3744…`, JS bundle `5a86a51c…`.
+- `adb install -r` → Success: `firstInstallTime` unchanged, `lastUpdateTime` 2026-10-21 15:25:01.
+- App storage before and after the install: identical (8 keys, digest `f50821c7…`); 3 recordings present.
+
+**On the phone with the ESP32 (V):**
+
+| Check | Result |
+|---|---|
+| Initial state | Earlier inhalation session (Entry 23 build): section shows "Not initialized", 0, 0, "—", and "This session was not processed by the current demo baseline (recorded before…)". Viewing it wrote nothing (the demo key was still absent) |
+| Short press 1 | `ref-inhalation-01` (previous choice was `ref-inhalation-08`). Analysis input `rec2018-01-23_11h00m14.641s.wav` (`reference_dataset`); capture `prism_794ccd81` verified, CRC `cbb3702e` = device, saved. Demo baseline initialized: B equals the session's Stage 9 z exactly (also recomputed on the PC from the bundled reference parameters); 1 session, 1 unique; no distance. The section says so |
+| Playback | "Device recording" played an 8000 Hz track for 15.2 s (15:27:50.54 → 15:28:05.79): the 15 s capture, not the 12 s analysis recording |
+| Short press 2 | `ref-inhalation-06` (no consecutive repeat). Demo baseline updated: D = 0.667676977448878 = sqrt(mean (z − B_before)²), recomputed on the PC (against B_after it would be 0.467); B_after = B_before + 0.3 (z − B_before) exactly; both vectors stored. 2 sessions, 2 unique. The section says "updated … distance from the baseline before the update: 0.668" |
+| Reopening | Reopening session 2, History, the other sessions, and back: demo key byte-identical |
+| App restart | Force-stop and relaunch: the section shows the same state; key unchanged |
+| Long press | `ref-no-inhalation-01`, NO_INHALATION_DETECTED, capture verified. Demo baseline unchanged. The section says "skipped: the no-inhalation reference is not an inhalation". The short-press selection state stayed `ref-inhalation-06` |
+| Reset | Confirmation text states its scope. After Reset: "Not initialized", 0; only `@PRISM:demoBaseline` changed (all other keys byte-identical); 6 sessions and 6 recordings kept |
+| Log | 0 FATAL, 0 JS errors |
+
+**N:**
+- a new session with an already-seen, non-consecutive reference on the phone (selection is random; covered by `test_demo_baseline` item 10);
+- a storage failure on the phone (covered by item 13).
+
+**Tests (V):** `PRISM_REQUIRE_DATASET=1 npm test` → exit 0, before and after the device checks. harness all passed; contract 446, assessment 503, sessions 150, ble 102, split source 195, demo baseline 71, session view 266, recording view 71; 0 failed.
+
+## Files changed
+This log only (Entry 26).
+
+**Committed together with the Entry 25 files** in a new commit on `ml-integration` (not pushed): `services/demoBaseline.js`, `components/DemoBaselineCard.js`, `services/test_demo_baseline.js`, `context/AppContext.js`, `screens/SessionDetailScreen.js`, `utils/researchView.js`, `package.json`, `claude_implementation.md`.
+
+**Phone state after this entry:**
+- the new build installed;
+- demo baseline reset (not initialized);
+- 3 test sessions added (two short presses, one long press; they sync to Firestore like any session).
+
+## Tests (command and outcome)
+`PRISM_REQUIRE_DATASET=1 npm test` → exit 0 (counts above).
+
+## Open issues / next step
+- The 20-recording pool expansion is a separate task (not started).
+- The backup folder above contains the Firebase sign-in record; delete it when no longer needed.

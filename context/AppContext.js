@@ -10,6 +10,7 @@ import { analyseHardwareRecording, analyseReferenceInput, deviceHistory } from "
 import { saveRecordingAudio, deleteRecordingAudio } from "../services/audioFiles";
 import { createAnalysisSelector, SELECTION } from "../services/analysisRecordings";
 import { loadAnalysisBytes } from "../services/analysisAudio";
+import { createDemoBaselineStore } from "../services/demoBaseline";
 import { getPipeline } from "../services/inferenceService";
 import { saveDevice } from "../services/deviceService";
 import { saveLastDevice } from "../services/storageService";
@@ -55,6 +56,12 @@ export function AppProvider({ children }) {
 
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const settingsRef = useRef(DEFAULT_SETTINGS);
+
+  // Demo Baseline (services/demoBaseline.js): its own storage key; updated only when a Start Event
+  // session has been stored, never by opening a screen.
+  const demoBaselineRef = useRef(null);
+  if (!demoBaselineRef.current) demoBaselineRef.current = createDemoBaselineStore({ storage: AsyncStorage });
+  const [demoBaseline, setDemoBaseline] = useState({ state: null, error: null });
 
   // ─── Auth ────────────────────────────────────────────────────────────────────
 
@@ -256,7 +263,18 @@ export function AppProvider({ children }) {
           audioFile,
           history: deviceHistory(sessionsRef.current, recording.device?.deviceId ?? null),
         })),
-      save: (record) => addNewSessionRef.current(record),
+      // After the session is stored, an eligible one updates the Demo Baseline once. Never throws, so the
+      // workflow (and the stored session) cannot be affected by the demo baseline.
+      save: async (record) => {
+        const sessionId = await addNewSessionRef.current(record);
+        try {
+          const result = await demoBaselineRef.current.observe(record);
+          setDemoBaseline({ state: result.state, error: result.error });
+        } catch (e) {
+          console.warn("[AppContext] demo baseline not updated:", e?.message ?? e);
+        }
+        return sessionId;
+      },
       onState: (state) => {
         setRecordingState(state);
         if (state.phase === LIFECYCLE.COMPLETED && settingsRef.current.vibrateOnResult) Vibration.vibrate(200);
@@ -285,6 +303,17 @@ export function AppProvider({ children }) {
   }, []);
 
   const dismissRecording = useCallback(() => workflowRef.current.reset(), []);
+
+  // ─── Demo Baseline ───────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    demoBaselineRef.current.load().then(setDemoBaseline);
+  }, []);
+
+  /** Clears only the demo baseline and its processing record (sessions and other data are kept). */
+  const resetDemoBaseline = useCallback(async () => {
+    setDemoBaseline(await demoBaselineRef.current.reset());
+  }, []);
 
   // ─── Value ───────────────────────────────────────────────────────────────────
 
@@ -315,6 +344,8 @@ export function AppProvider({ children }) {
         startOnBoardRecording,
         startEvent,
         dismissRecording,
+        demoBaseline,
+        resetDemoBaseline,
         settings,
         updateSettings,
       }}

@@ -9,20 +9,23 @@ import Waveform from "../components/Waveform";
 import CaptureCard from "../components/CaptureCard";
 import RecordingPlayback from "../components/RecordingPlayback";
 import ResearchMeasurements from "../components/ResearchMeasurements";
+import DemoBaselineCard from "../components/DemoBaselineCard";
 import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
 import { formatTimestamp, formatTime } from "../utils/formatters";
 import { describeSession } from "../utils/sessionView";
 import { describeCapture } from "../utils/captureView";
-import { describeResearch } from "../utils/researchView";
+import { describeResearch, describeDemoBaseline } from "../utils/researchView";
 
 export default function SessionDetailScreen({ route }) {
-  const { sessions } = useAppContext();
+  const { sessions, demoBaseline, resetDemoBaseline } = useAppContext();
   // The list entry is looked up again so the sync state stays current while the screen is open.
   const passed = route.params.session;
   const session = sessions.find((s) => s.id === passed.id) ?? passed;
   const view = describeSession(session);
   const capture = describeCapture(session);
   const research = !view.legacy && !view.simulated ? describeResearch(session) : null;
+  // Start Event (device) sessions: the Demo Baseline section (read-only; it is updated when a session is stored)
+  const demo = !view.legacy && view.source === "ble" ? describeDemoBaseline(demoBaseline, session) : null;
 
   // The recording behind the session's analysis: a bundled demo recording, a PRISM device recording
   // kept on this phone, or for a Start Event session the reference recording it was analysed from
@@ -155,6 +158,9 @@ export default function SessionDetailScreen({ route }) {
 
       {/* Research measurements: separate and collapsed (utils/researchView.js) */}
       {research && (research.available || research.personal) && <ResearchMeasurements research={research} />}
+
+      {/* Demo Baseline: a separate demonstration, not part of the Stage 9 result (services/demoBaseline.js) */}
+      {demo && <DemoBaselineCard view={demo} onReset={resetDemoBaseline} />}
 
       {/* Device info */}
       {view.deviceId && (

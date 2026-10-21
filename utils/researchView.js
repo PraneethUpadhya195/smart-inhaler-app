@@ -14,6 +14,9 @@
  * The session list, the status badge and the event list (utils/sessionView.js) never show these.
  */
 
+import { loadAssessmentReference } from "../pipeline/ReferenceAssessment.js";
+import { demoBaselineInput } from "../services/demoBaseline.js";
+
 export const RANGE_TEXT = Object.freeze({
   WITHIN_REFERENCE_RANGE: "Acoustically within the range of the reference recordings",
   OUTSIDE_REFERENCE_RANGE: "Acoustically outside the range of the reference recordings",
@@ -94,5 +97,49 @@ export function describeResearch(session) {
         ? `${personal.n_qualifying_sittings} of ${personal.s_min} qualifying sittings (${personal.n_sittings} sitting(s) recorded with this device)`
         : null,
     } : null,
+  };
+}
+
+// ─── Demo Baseline (services/demoBaseline.js) ────────────────────────────────
+
+export const DEMO_BASELINE_EXPLANATION =
+  "Demonstration baseline calculated from eligible reference inhalations. It illustrates baseline initialization and " +
+  "adaptation; it is not a personalized baseline or a clinically validated score.";
+
+let demoReference = null;
+
+/**
+ * The Demo Baseline section of a session screen: the baseline's state and what this session did to it.
+ * Read-only: it never updates the baseline (that happens once, when a session is stored).
+ * @param {{ state: Object|null, error: string|null }} demo - AppContext.demoBaseline
+ * @param {Object} session - history item
+ * @returns {Object|null} null until the demo baseline has been loaded
+ */
+export function describeDemoBaseline(demo, session) {
+  const state = demo?.state;
+  if (!state) return null;
+  if (!demoReference) demoReference = loadAssessmentReference();
+  const sessionId = session?.session_id ?? session?.id ?? null;
+  const c = sessionId ? state.contributions?.[sessionId] : null;
+  let thisSession;
+  if (c?.action === "initialized") {
+    thisSession = "This session initialized the demo baseline. No distance was calculated: there was no earlier baseline.";
+  } else if (c?.action === "updated") {
+    thisSession = `This session updated the demo baseline. Distance from the baseline before the update: ${num(c.deviation)?.toFixed(3) ?? "—"}.`;
+  } else {
+    const input = demoBaselineInput(session, demoReference);
+    thisSession = input.eligible
+      ? "This session was not processed by the current demo baseline (it was recorded before the baseline started or before its last reset)."
+      : `This session was skipped: ${input.reason}.`;
+  }
+  return {
+    explanation: DEMO_BASELINE_EXPLANATION,
+    error: demo.error ?? null,
+    stateLabel: state.initialized ? "Initialized" : "Not initialized",
+    sessionsProcessed: state.sessions_processed,
+    uniqueReferences: state.unique_reference_ids.length,
+    lastReference: state.last_reference_id ?? "—",
+    lastDistance: num(state.last_deviation)?.toFixed(3) ?? "—",
+    thisSession,
   };
 }
