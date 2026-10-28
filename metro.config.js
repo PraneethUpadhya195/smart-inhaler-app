@@ -7,5 +7,6 @@ const config = getDefaultConfig(__dirname);
 // package.json "exports" conditions. Without this flag, Metro falls back to
 // the browser bundle, which breaks getAuth() and other Firebase APIs on device.
 config.resolver.unstable_enablePackageExports = true;
+config.resolver.assetExts.push('onnx');
 
 module.exports = config;

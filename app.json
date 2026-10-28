@@ -6,12 +6,6 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
-    },
     "ios": {
       "supportsTablet": true
     },
@@ -20,7 +14,6 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true,
       "package": "com.anonymous.smart_inhaler_app"
     },
     "web": {
@@ -28,7 +21,25 @@
     },
     "plugins": [
       "expo-font",
-      "expo-status-bar"
+      "expo-status-bar",
+      "onnxruntime-react-native",
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": false,
+          "modes": [],
+          "neverForLocation": true,
+          "bluetoothAlwaysPermission": "PRISM connects to the PRISM inhaler device over Bluetooth to record inhaler sounds."
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": false,
+          "recordAudioAndroid": false,
+          "enableBackgroundPlayback": false
+        }
+      ]
     ]
   }
 }

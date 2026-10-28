@@ -6,11 +6,9 @@ import { StatusBar } from "expo-status-bar";
 import { AppProvider, useAppContext } from "./context/AppContext";
 import AppNavigator from "./navigation/AppNavigator";
 
-import { signInAnonymously } from "./services/authService";
-import { seedSampleData, getSessions } from "./services/sessionService";
-import { getDevice } from "./services/deviceService";
-import { getLastDevice, clearLastDevice } from "./services/storageService";
-import * as bleService from "./services/bleService";
+import { ensureSignedIn } from "./services/authService";
+import { getLastDevice } from "./services/storageService";
+import { reconnectIfPermitted } from "./services/bleService";
 
 import { COLORS } from "./utils/theme";
 
@@ -41,36 +39,44 @@ export default function App() {
 // ─── AppRoot: handles init logic, then renders navigator ──────────────────────
 
 function AppRoot() {
-  const { initUser, loadSessions, setDeviceConnected } = useAppContext();
+  const { initUser, loadSessions, requestSync } = useAppContext();
   const [isReady, setIsReady] = useState(false);
-  const [initError, setInitError] = useState(null);
 
   useEffect(() => {
+    let cancelled = false;
+
     async function initialize() {
+      // 1. Sessions stored on this phone: no network or Firebase needed.
       try {
-        // 1. Sign in anonymously (Firebase SDK persists UID via AsyncStorage)
-        const userId = await signInAnonymously();
-        initUser(userId);
-
-        // 2. Seed sample data if Firestore sessions collection is empty
-        await seedSampleData(userId);
-
-        // 3. Load sessions into context
-        await loadSessions(userId);
-
-        // 4. Auto-reconnect: validate saved device against Firestore
-        await attemptAutoReconnect(userId, setDeviceConnected);
+        await loadSessions();
       } catch (e) {
-        console.error("[App] Initialization error:", e);
-        setInitError(
-          "Failed to connect to Firebase.\nPlease check your firebase/config.js credentials."
-        );
+        console.error("[App] Local sessions not loaded:", e);
       } finally {
-        setIsReady(true);
+        if (!cancelled) setIsReady(true);
       }
+
+      // 2. The last PRISM device, in the background: only if Bluetooth permissions were granted
+      //    before (no prompt at start-up); the recorder reports the connection to AppContext.
+      attemptAutoReconnect();
+
+      // 3. Cloud, in the background and best effort. Offline or without Firebase the app keeps
+      //    working locally and pending sessions are uploaded by a later sync.
+      requestSync("startup");
+      // Sign in anonymously (Firebase SDK persists UID via AsyncStorage)
+      const userId = await ensureSignedIn();
+      if (cancelled || !userId) return;
+      initUser(userId);
+
+      // No seeding: a new user starts with an empty history.
+
+      // Merge the Firestore history into the local one
+      await loadSessions(userId);
     }
 
     initialize();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (!isReady) {
@@ -80,17 +86,6 @@ function AppRoot() {
         <Text style={styles.splashTitle}>💨 Smart Inhaler</Text>
         <ActivityIndicator color={COLORS.primary} style={{ marginTop: 24 }} />
         <Text style={styles.splashSubtitle}>Initializing…</Text>
-      </View>
-    );
-  }
-
-  if (initError) {
-    return (
-      <View style={styles.splash}>
-        <StatusBar style="light" />
-        <Text style={styles.errorIcon}>⚠️</Text>
-        <Text style={styles.errorTitle}>Configuration Error</Text>
-        <Text style={styles.errorMessage}>{initError}</Text>
       </View>
     );
   }
@@ -118,31 +113,18 @@ function AppRoot() {
 
 // ─── Auto-reconnect helper ────────────────────────────────────────────────────
 
-async function attemptAutoReconnect(userId, setDeviceConnected) {
+/**
+ * Reconnect to the PRISM device used last (its BLE id is kept on this phone). Entries written by
+ * earlier app versions (simulated devices, no BLE id) are ignored. Best effort: failures are logged.
+ */
+async function attemptAutoReconnect() {
   try {
     const saved = await getLastDevice();
-    if (!saved?.deviceId) return;
-
-    // Validate that this device still exists under the current userId in Firestore
-    const deviceDoc = await getDevice(userId, saved.deviceId);
-    if (!deviceDoc) {
-      // Stale — clear the saved device
-      await clearLastDevice();
-      console.log("[App] Saved device not found in Firestore — cleared AsyncStorage entry.");
-      return;
-    }
-
-    // Simulate BLE reconnect
-    const result = await bleService.connectToDevice(saved.deviceId);
-    setDeviceConnected({
-      deviceId: result.deviceId,
-      deviceName: saved.deviceName || result.deviceName,
-      batteryLevel: result.batteryLevel,
-    });
-    console.log("[App] Auto-reconnected to", saved.deviceId);
+    if (!saved?.bleId) return;
+    const device = await reconnectIfPermitted(saved.bleId);
+    if (device) console.log("[App] Reconnected to", device.name ?? device.deviceId);
   } catch (e) {
-    // Auto-reconnect is best-effort — don't crash the app
-    console.warn("[App] Auto-reconnect failed silently:", e);
+    console.warn("[App] Auto-reconnect failed:", e?.message ?? e);
   }
 }
 
@@ -165,15 +147,6 @@ const styles = StyleSheet.create({
   splashSubtitle: {
     fontSize: 14,
     color: COLORS.textMuted,
-    marginTop: 8,
-  },
-  errorIcon: { fontSize: 48 },
-  errorTitle: { fontSize: 20, fontWeight: "700", color: COLORS.danger, marginTop: 8 },
-  errorMessage: {
-    fontSize: 14,
-    color: COLORS.textMuted,
-    textAlign: "center",
-    lineHeight: 22,
     marginTop: 8,
   },
 });

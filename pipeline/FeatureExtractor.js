@@ -1,0 +1,149 @@
+import FFT from 'fft.js';
+import { PIPELINE_CONFIG } from './versions.js';
+import { DSP_CONSTANTS } from './dsp_constants.js';
+import { frameSpectrum, rolloffFrequency } from './dsp.js';
+import { featureSchemaV2 } from './contractAssets.js';
+
+/**
+ * Stage 10: Versioned Event-Feature Engine
+ * Extracts anomaly features and mean_rms from isolated event PCM segments.
+ */
+export class FeatureExtractor {
+    /**
+     * @param {Object} [schema] - parsed v2_feature_schema.json (default: the bundled copy).
+     *   Loaded statically (contractAssets.js), not through fs, so this works in React Native.
+     */
+    constructor(schema = featureSchemaV2) {
+        this.schema = schema;
+        this.n_fft = this.schema.frames.n_fft; // 256
+        this.hop = this.schema.frames.hop_length; // 64
+        if (this.n_fft !== PIPELINE_CONFIG.nFft || this.hop !== PIPELINE_CONFIG.hopLength) {
+            throw new Error(`feature schema frames (n_fft ${this.n_fft}, hop ${this.hop}) do not match the pipeline configuration`);
+        }
+        
+        this.fft = new FFT(this.n_fft);
+        this.hann_window = DSP_CONSTANTS.hann_window;
+        this.fft_freqs = DSP_CONSTANTS.fft_frequencies;
+    }
+    
+    /**
+     * Compute features for an isolated PCM segment
+     * @param {Float32Array} pcm 
+     * @returns {import('./types').EventFeatures}
+     */
+    extractFeatures(pcm) {
+        // 1. Mean RMS
+        const mean_rms = this._computeMeanRms(pcm);
+        
+        // 2. STFT Spectral Features
+        const { centroids, flatnesses, rolloffs } = this._computeSpectralFrames(pcm);
+        
+        // 3. Aggregate
+        const featuresArray = new Float64Array(4); // the 4 anomaly features
+        
+        // From v2_feature_schema.json:
+        // 0: spectral_centroid_mean
+        // 1: spectral_flatness_mean
+        // 2: spectral_centroid_std
+        // 3: spectral_rolloff_std
+        
+        featuresArray[0] = this._mean(centroids);
+        featuresArray[1] = this._mean(flatnesses);
+        featuresArray[2] = this._std(centroids);
+        featuresArray[3] = this._std(rolloffs);
+        
+        return {
+            version: this.schema.contract_version,
+            features: featuresArray,
+            mean_rms: mean_rms
+        };
+    }
+    
+    /**
+     * Compute mean RMS: 256-sample frames, hop 64, partial final frames included, no padding
+     */
+    _computeMeanRms(pcm) {
+        if (pcm.length === 0) return 0;
+        
+        let sumRms = 0;
+        let count = 0;
+        
+        for (let i = 0; i < pcm.length; i += this.hop) {
+            let sumSq = 0;
+            let frameLen = Math.min(this.n_fft, pcm.length - i);
+            for (let j = 0; j < frameLen; j++) {
+                sumSq += pcm[i + j] * pcm[i + j];
+            }
+            sumRms += Math.sqrt(sumSq / frameLen);
+            count++;
+        }
+        
+        return count > 0 ? sumRms / count : 0;
+    }
+    
+    _computeSpectralFrames(pcm) {
+        // Constant zero-padding, n_fft // 2 each side
+        const pad = Math.floor(this.n_fft / 2);
+        const paddedLen = pcm.length + 2 * pad;
+        const paddedPcm = new Float32Array(paddedLen);
+        paddedPcm.set(pcm, pad);
+        
+        const numFrames = 1 + Math.floor(pcm.length / this.hop);
+        
+        const centroids = new Float32Array(numFrames);
+        const flatnesses = new Float32Array(numFrames);
+        const rolloffs = new Float32Array(numFrames);
+        
+        for (let i = 0; i < numFrames; i++) {
+            const start = i * this.hop;
+            
+            // |STFT| and power exactly as the frame features (dsp.frameSpectrum, librosa)
+            const { mag, power } = frameSpectrum(this.fft, paddedPcm, start, this.hann_window);
+            const numBins = mag.length;
+            let sumMag = 0;
+            for (let k = 0; k < numBins; k++) sumMag += mag[k];
+            
+            // Centroid
+            let num = 0;
+            for (let k = 0; k < numBins; k++) {
+                num += this.fft_freqs[k] * mag[k];
+            }
+            centroids[i] = (sumMag > 0 ? num / sumMag : 0) / 4000.0;
+            
+            // Flatness
+            let sumLog = 0;
+            let sumPower = 0;
+            for (let k = 0; k < numBins; k++) {
+                const p = Math.max(power[k], 1e-10);
+                sumLog += Math.log(p);
+                sumPower += p;
+            }
+            const geoMean = Math.exp(sumLog / numBins);
+            const arithMean = sumPower / numBins;
+            flatnesses[i] = arithMean > 0 ? geoMean / arithMean : 0;
+            
+            // Rolloff (0.85), float32 accumulation as librosa (F15)
+            rolloffs[i] = rolloffFrequency(mag, this.fft_freqs, PIPELINE_CONFIG.rolloffPercent) / 4000.0;
+        }
+        
+        return { centroids, flatnesses, rolloffs };
+    }
+    
+    _mean(arr) {
+        if (arr.length === 0) return 0;
+        let sum = 0;
+        for (let i = 0; i < arr.length; i++) sum += arr[i];
+        return sum / arr.length;
+    }
+    
+    _std(arr) {
+        if (arr.length === 0) return 0;
+        const mean = this._mean(arr);
+        let sumSq = 0;
+        for (let i = 0; i < arr.length; i++) {
+            const diff = arr[i] - mean;
+            sumSq += diff * diff;
+        }
+        return Math.sqrt(sumSq / arr.length);
+    }
+}

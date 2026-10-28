@@ -3,10 +3,10 @@ import { View, Text, StyleSheet } from "react-native";
 import { COLORS, RADIUS, SPACING } from "../utils/theme";
 
 /**
- * StatusTag — small badge for session source ("SIM" / "BLE")
- * and session status ("Interrupted").
+ * StatusTag — small badge for session source ("SIM" / "BLE" / "WAV"),
+ * cloud sync state ("Synced" / "Not synced") and session status ("Interrupted").
  *
- * @param {{ type: "source" | "status", value: string }} props
+ * @param {{ type: "source" | "sync" | "status", value: string }} props
  */
 export default function StatusTag({ type, value }) {
   const config = getConfig(type, value);
@@ -26,6 +26,17 @@ function getConfig(type, value) {
     }
     if (value === "ble") {
       return { label: "BLE", bg: COLORS.tagBle + "22", border: COLORS.tagBle + "60", color: COLORS.tagBle };
+    }
+    if (value === "wav") {
+      return { label: "WAV", bg: COLORS.tagBle + "22", border: COLORS.tagBle + "60", color: COLORS.tagBle };
+    }
+  }
+  if (type === "sync") {
+    if (value === "synced") {
+      return { label: "Synced", bg: COLORS.textMuted + "22", border: COLORS.textMuted + "60", color: COLORS.textSecondary };
+    }
+    if (value === "pending") {
+      return { label: "Not synced", bg: COLORS.warning + "22", border: COLORS.warning + "60", color: COLORS.warning };
     }
   }
   if (type === "status") {

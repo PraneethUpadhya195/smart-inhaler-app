@@ -1,34 +1,47 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { View, Text, StyleSheet, ScrollView } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { useAppContext } from "../context/AppContext";
+import { loadSessionWaveform } from "../services/sessionWaveform";
 import ResultBadge from "../components/ResultBadge";
-import IssueList from "../components/IssueList";
 import StatusTag from "../components/StatusTag";
+import Waveform from "../components/Waveform";
+import CaptureCard from "../components/CaptureCard";
+import RecordingPlayback from "../components/RecordingPlayback";
+import ResearchMeasurements from "../components/ResearchMeasurements";
+import DemoBaselineCard from "../components/DemoBaselineCard";
 import { COLORS, SPACING, RADIUS, SHADOW } from "../utils/theme";
-import {
-  formatTimestamp,
-  formatDuration,
-  formatMs,
-  formatDeviationFlag,
-} from "../utils/formatters";
+import { formatTimestamp, formatTime } from "../utils/formatters";
+import { describeSession } from "../utils/sessionView";
+import { describeCapture } from "../utils/captureView";
+import { describeResearch, describeDemoBaseline } from "../utils/researchView";
 
 export default function SessionDetailScreen({ route }) {
-  const { session } = route.params;
-  const {
-    timestamp,
-    duration,
-    event_classification,
-    quality_assessment,
-    technique_flags,
-    source,
-    status,
-    deviceId,
-    model_version,
-  } = session;
+  const { sessions, demoBaseline, resetDemoBaseline } = useAppContext();
+  // The list entry is looked up again so the sync state stays current while the screen is open.
+  const passed = route.params.session;
+  const session = sessions.find((s) => s.id === passed.id) ?? passed;
+  const view = describeSession(session);
+  const capture = describeCapture(session);
+  const research = !view.legacy && !view.simulated ? describeResearch(session) : null;
+  // Start Event (device) sessions: the Demo Baseline section (read-only; it is updated when a session is stored)
+  const demo = !view.legacy && view.source === "ble" ? describeDemoBaseline(demoBaseline, session) : null;
 
-  const isInterrupted = status === "interrupted";
-  const ec = event_classification || {};
-  const qa = quality_assessment || {};
+  // The recording behind the session's analysis: a bundled demo recording, a PRISM device recording
+  // kept on this phone, or for a Start Event session the reference recording it was analysed from
+  // (null for simulated and legacy sessions). Playback is always the device recording (capture).
+  const [waveform, setWaveform] = useState(null);
+  useEffect(() => {
+    let active = true;
+    setWaveform(null);
+    loadSessionWaveform(session)
+      .then((w) => { if (active) setWaveform(w); })
+      .catch((e) => {
+        console.warn("[SessionDetail] waveform not loaded:", e?.message ?? e);
+        if (active) setWaveform({ missing: "The recording could not be read on this phone." });
+      });
+    return () => { active = false; };
+  }, [session.id]); // eslint-disable-line react-hooks/exhaustive-deps -- the recording is fixed per session
 
   return (
     <ScrollView
@@ -36,110 +49,124 @@ export default function SessionDetailScreen({ route }) {
       contentContainerStyle={styles.content}
       showsVerticalScrollIndicator={false}
     >
-      {/* Interrupted warning banner */}
-      {isInterrupted && (
-        <View style={styles.warningBanner}>
-          <Text style={styles.warningIcon}>⚠️</Text>
-          <Text style={styles.warningText}>
-            This session was interrupted — the device disconnected mid-inhalation.
-            Data may be incomplete.
-          </Text>
+      {/* Simulated / legacy notes */}
+      {view.simulated && (
+        <Banner
+          icon="flask-outline"
+          color={COLORS.tagSim}
+          text={view.note ?? "Simulated session: synthetic test audio, not a recording."}
+        />
+      )}
+      {!view.simulated && view.note && <Banner icon="information-circle-outline" color={COLORS.primary} text={view.note} />}
+      {view.legacy && <Banner icon="archive-outline" color={COLORS.textSecondary} text={view.status.description} />}
+
+      {/* Input / processing errors */}
+      {view.problems.length > 0 && (
+        <Banner
+          icon="alert-circle-outline"
+          color={COLORS.warning}
+          text={view.problems.map((p) => p.text).join("\n")}
+        />
+      )}
+
+      {/* Status + metadata */}
+      <View style={[styles.card, SHADOW.card]}>
+        <Row label="Status">
+          <ResultBadge label={view.status.key} />
+        </Row>
+        {!view.legacy && <Text style={styles.description}>{view.status.description}</Text>}
+        <Row label="Source">
+          <Text style={styles.value}>{view.sourceLabel}</Text>
+        </Row>
+        <Row label="Saved">
+          <Text style={styles.value}>{formatTimestamp(view.savedAt)}</Text>
+        </Row>
+        {view.recordedAt && (
+          <Row label="Recorded">
+            <Text style={styles.value}>{formatTimestamp(view.recordedAt)}</Text>
+          </Row>
+        )}
+        <Row label="Cloud sync">
+          <StatusTag type="sync" value={view.sync.state} />
+        </Row>
+        {view.sync.detail && <Text style={styles.small}>Last attempt: {view.sync.detail}</Text>}
+      </View>
+
+      {/* The recording: waveform with the detected events, and playback of the device recording */}
+      {(waveform || capture?.audioFile) && (
+        <View style={[styles.card, SHADOW.card]}>
+          <Text style={styles.sectionTitle}>Recording</Text>
+          {waveform?.missing ? (
+            <Text style={styles.small}>{waveform.missing}</Text>
+          ) : waveform ? (
+            <>
+              {waveform.label && <Text style={styles.small}>{waveform.label}</Text>}
+              <Waveform
+                peaks={waveform.peaks}
+                durationS={waveform.durationS}
+                events={view.events.filter((ev) => ev.recordingNumber === null)}
+              />
+            </>
+          ) : null}
+          {view.analysisCaption && <Text style={styles.small}>{view.analysisCaption}</Text>}
+          {capture?.audioFile && <RecordingPlayback file={capture.audioFile} />}
         </View>
       )}
 
-      {/* Result + tags */}
-      <View style={[styles.card, SHADOW.card]}>
-        <Row label="Result">
-          <ResultBadge label={qa.composite_label} />
-        </Row>
-        <Row label="Source">
-          <StatusTag type="source" value={source} />
-        </Row>
-        {isInterrupted && (
-          <Row label="Status">
-            <StatusTag type="status" value="interrupted" />
-          </Row>
-        )}
-        <Row label="Timestamp">
-          <Text style={styles.value}>{formatTimestamp(timestamp)}</Text>
-        </Row>
-        {model_version && (
-          <Row label="Model">
-            <Text style={styles.valueMono}>{model_version}</Text>
-          </Row>
-        )}
-      </View>
+      {/* PRISM device recordings: how the audio was captured and received */}
+      {capture && <CaptureCard capture={capture} />}
 
-      {/* Quality Assessment */}
-      <View style={[styles.card, SHADOW.card]}>
-        <Text style={styles.sectionTitle}>Quality Assessment</Text>
-        <View style={styles.metricsGrid}>
-          <MetricBox
-            label="Duration"
-            value={formatDuration(duration)}
-          />
+      {/* Counts */}
+      {view.counts && (
+        <View style={[styles.card, SHADOW.card]}>
+          <Text style={styles.sectionTitle}>Summary</Text>
+          <View style={styles.metricsGrid}>
+            <MetricBox label="Recordings" value={view.counts.recordings} />
+            <MetricBox label="Events" value={view.counts.events} />
+            <MetricBox label="Not scoreable" value={view.counts.notScoreable} />
+          </View>
         </View>
-        <View style={styles.metricsGrid}>
-          <MetricBox
-            label="Deviation"
-            value={qa.deviation_score != null ? qa.deviation_score.toFixed(1) : "—"}
-            color={deviationColor(qa.deviation_score)}
-          />
-          <MetricBox
-            label="Baseline"
-            value={formatDeviationFlag(qa.deviation_flag)}
-            small
-          />
+      )}
+
+      {/* Individual Events */}
+      {view.events.length > 0 && (
+        <View style={[styles.card, SHADOW.card]}>
+          <Text style={styles.sectionTitle}>Detected Events</Text>
+          {view.events.map((ev) => (
+            <View key={ev.key} style={styles.event}>
+              <Text style={styles.eventTitle}>
+                Event {ev.number}
+                {ev.recordingNumber ? ` · recording ${ev.recordingNumber}` : ""} · {ev.statusLabel}
+              </Text>
+              <DetailRow
+                icon="time-outline"
+                label="Time in recording"
+                value={`${formatTime(ev.startTime)} – ${formatTime(ev.endTime)}`}
+              />
+              <DetailRow
+                icon="resize-outline"
+                label="Duration"
+                value={formatTime(ev.durationS)}
+              />
+              {ev.reasons.map((reason) => (
+                <Text key={reason} style={styles.reason}>• {reason}</Text>
+              ))}
+            </View>
+          ))}
         </View>
-      </View>
+      )}
 
-      {/* Event Classification */}
-      <View style={[styles.card, SHADOW.card]}>
-        <Text style={styles.sectionTitle}>Event Classification</Text>
-        <DetailRow
-          icon="medical-outline"
-          label="Drug Detected"
-          value={ec.drug_detected ? "Yes" : "No"}
-          valueColor={ec.drug_detected ? COLORS.success : COLORS.danger}
-        />
-        <DetailRow
-          icon="timer-outline"
-          label="Drug Duration"
-          value={formatMs(ec.drug_duration_ms)}
-        />
-        <DetailRow
-          icon="resize-outline"
-          label="Inhale Duration"
-          value={formatMs(ec.inhale_duration_ms)}
-        />
-        <DetailRow
-          icon="sync-outline"
-          label="Coordination Delay"
-          value={formatMs(ec.coordination_delay_ms)}
-          valueColor={ec.coordination_delay_ms > 500 ? COLORS.warning : undefined}
-        />
-        <DetailRow
-          icon="swap-vertical-outline"
-          label="Pre-Exhale Detected"
-          value={ec.pre_exhale_detected ? "Yes" : "No"}
-          valueColor={ec.pre_exhale_detected ? COLORS.success : COLORS.warning}
-        />
-      </View>
+      {/* Research measurements: separate and collapsed (utils/researchView.js) */}
+      {research && (research.available || research.personal) && <ResearchMeasurements research={research} />}
 
-      {/* Technique Issues */}
-      <View style={[styles.card, SHADOW.card]}>
-        <Text style={styles.sectionTitle}>Technique Issues</Text>
-        <IssueList
-          event_classification={event_classification}
-          technique_flags={technique_flags}
-        />
-      </View>
+      {/* Demo Baseline: a separate demonstration, not part of the Stage 9 result (services/demoBaseline.js) */}
+      {demo && <DemoBaselineCard view={demo} onReset={resetDemoBaseline} />}
 
       {/* Device info */}
-      {deviceId && (
+      {view.deviceId && (
         <View style={[styles.card, SHADOW.card]}>
           <Text style={styles.sectionTitle}>Device</Text>
-          <Text style={styles.deviceId}>{deviceId}</Text>
+          <Text style={styles.deviceId}>{view.deviceId}</Text>
         </View>
       )}
     </ScrollView>
@@ -147,6 +174,15 @@ export default function SessionDetailScreen({ route }) {
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
+
+function Banner({ icon, color, text }) {
+  return (
+    <View style={[styles.banner, { backgroundColor: color + "18", borderColor: color + "50" }]}>
+      <Ionicons name={icon} size={18} color={color} />
+      <Text style={[styles.bannerText, { color }]}>{text}</Text>
+    </View>
+  );
+}
 
 function Row({ label, children }) {
   return (
@@ -157,41 +193,25 @@ function Row({ label, children }) {
   );
 }
 
-function MetricBox({ label, value, color, small }) {
+function MetricBox({ label, value }) {
   return (
     <View style={styles.metricBox}>
-      <Text
-        style={[
-          small ? styles.metricValueSmall : styles.metricValue,
-          color && { color },
-        ]}
-        numberOfLines={1}
-        adjustsFontSizeToFit
-      >
-        {value}
+      <Text style={styles.metricValue} numberOfLines={1} adjustsFontSizeToFit>
+        {value ?? "—"}
       </Text>
       <Text style={styles.metricLabel}>{label}</Text>
     </View>
   );
 }
 
-function DetailRow({ icon, label, value, valueColor }) {
+function DetailRow({ icon, label, value }) {
   return (
     <View style={styles.detailRow}>
       <Ionicons name={icon} size={16} color={COLORS.textMuted} style={styles.detailIcon} />
       <Text style={styles.detailLabel}>{label}</Text>
-      <Text style={[styles.detailValue, valueColor && { color: valueColor }]}>{value}</Text>
+      <Text style={styles.detailValue}>{value}</Text>
     </View>
   );
-}
-
-// ─── Color helpers ────────────────────────────────────────────────────────────
-
-function deviationColor(score) {
-  if (score == null) return COLORS.textMuted;
-  if (score < 1.5) return COLORS.success;
-  if (score < 3.0) return COLORS.warning;
-  return COLORS.danger;
 }
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
@@ -200,18 +220,15 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.background },
   content: { padding: SPACING.md, paddingBottom: SPACING.xl, gap: SPACING.md },
 
-  warningBanner: {
+  banner: {
     flexDirection: "row",
     alignItems: "flex-start",
     gap: SPACING.sm,
-    backgroundColor: COLORS.warning + "18",
     borderRadius: RADIUS.md,
     borderWidth: 1,
-    borderColor: COLORS.warning + "50",
     padding: SPACING.md,
   },
-  warningIcon: { fontSize: 18 },
-  warningText: { flex: 1, color: COLORS.warning, fontSize: 13, lineHeight: 20 },
+  bannerText: { flex: 1, fontSize: 13, lineHeight: 20 },
 
   card: {
     backgroundColor: COLORS.surface,
@@ -229,6 +246,8 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     marginBottom: SPACING.xs,
   },
+  description: { color: COLORS.textSecondary, fontSize: 13, lineHeight: 19 },
+  small: { color: COLORS.textMuted, fontSize: 12 },
 
   row: {
     flexDirection: "row",
@@ -239,8 +258,7 @@ const styles = StyleSheet.create({
     borderBottomColor: COLORS.border,
   },
   rowLabel: { color: COLORS.textSecondary, fontSize: 14 },
-  value: { color: COLORS.text, fontSize: 14, fontWeight: "500" },
-  valueMono: { color: COLORS.textSecondary, fontSize: 12, fontFamily: "monospace" },
+  value: { color: COLORS.text, fontSize: 14, fontWeight: "500", flexShrink: 1, textAlign: "right" },
 
   metricsGrid: {
     flexDirection: "row",
@@ -255,8 +273,16 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   metricValue: { fontSize: 28, fontWeight: "700", color: COLORS.text },
-  metricValueSmall: { fontSize: 16, fontWeight: "700", color: COLORS.text },
   metricLabel: { fontSize: 12, color: COLORS.textMuted },
+
+  event: {
+    marginBottom: SPACING.md,
+    paddingBottom: SPACING.sm,
+    borderBottomWidth: 1,
+    borderColor: COLORS.border,
+  },
+  eventTitle: { fontWeight: "700", color: COLORS.text, marginBottom: SPACING.xs },
+  reason: { fontSize: 12, color: COLORS.textSecondary, marginTop: SPACING.xs },
 
   detailRow: {
     flexDirection: "row",
